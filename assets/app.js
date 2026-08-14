@@ -49,6 +49,7 @@
         var li = document.createElement('li');
         li.dataset.idx = idx;
         var left = document.createElement('span');
+        left.className = 'nm';
         var no = document.createElement('span');
         no.className = 'no';
         no.textContent = '#' + it.id;

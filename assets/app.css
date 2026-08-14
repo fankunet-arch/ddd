@@ -59,7 +59,8 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
 .combo-list li{padding:7px 10px;border-radius:4px;cursor:pointer;display:flex;
   justify-content:space-between;gap:10px;font-size:13px}
 .combo-list li:hover,.combo-list li.sel{background:#eef3fe}
-.combo-list li .pc{color:var(--dim);font-size:11px;white-space:nowrap}
+.combo-list li .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.combo-list li .pc{color:var(--dim);font-size:11px;white-space:nowrap;flex:none}
 .combo-list li .no{color:var(--dim);font-size:11px;margin-right:6px}
 .combo-list .none{color:var(--dim);cursor:default;justify-content:center}
 
@@ -99,6 +100,13 @@ table.grid .date{font-variant-numeric:tabular-nums}
 table.grid .date .wd{color:var(--dim);font-size:11px;margin-left:2px}
 table.grid tr.sum td{background:#f7f9fc;font-weight:600}
 
+/* 菜名列：超长时截断成省略号，避免把表格撑出容器。
+   max-width 加在内部块元素上而不是 td 上 —— 表格 auto 布局下
+   td 的 max-width 常被忽略，加在块元素上各浏览器行为才一致。
+   完整菜名保留在 title 属性里，鼠标悬停可见。 */
+table.grid td.iname>a,table.grid td.iname>span{
+  display:block;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* 排行条 */
 table.rank .barcol{width:130px;padding-right:14px}
 table.rank .bar{display:block;height:7px;border-radius:4px;min-width:2px}
@@ -114,8 +122,18 @@ table.rank .bar.bottom{background:linear-gradient(90deg,#e9b978,#dd9440)}
 .station .pcname{font-weight:650}
 .station .pcmeta{color:var(--dim);font-size:12px;margin-left:auto}
 .station .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px 16px}
+/* grid 子项默认 min-width:auto，内容再宽也不肯收缩，会把右边那张表顶出容器。
+   置 0 后两列才真正各占一半，超宽内容交给 .tablewrap 自己横向滚动。 */
+.station .cols>div{min-width:0}
 .station .cols .tablewrap{border:1px solid var(--line)}
-@media(max-width:900px){.station .cols{grid-template-columns:1fr}}
+/* 左右并排时列窄一半，菜名相应截得更短 */
+.station .cols table.grid td.iname>a,
+.station .cols table.grid td.iname>span{max-width:170px}
+@media(max-width:900px){
+  .station .cols{grid-template-columns:1fr}
+  .station .cols table.grid td.iname>a,
+  .station .cols table.grid td.iname>span{max-width:300px}
+}
 
 /* ---------- 杂项 ---------- */
 .tag{font-size:12px;background:#eef1f6;color:var(--dim);padding:2px 9px;border-radius:20px;

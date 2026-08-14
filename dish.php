@@ -322,7 +322,9 @@ pageHeader('菜品点单统计', 'dish');
       <thead><tr><th class="n">编号</th><th>菜品</th><th>岗位</th></tr></thead>
       <tbody>
       <?php foreach ($never as $n): ?>
-        <tr><td class="n dim"><?= (int) $n['id'] ?></td><td><?= h($n['name']) ?></td><td><?= h($n['pc_name']) ?></td></tr>
+        <tr><td class="n dim"><?= (int) $n['id'] ?></td>
+            <td class="iname"><span title="<?= h($n['name']) ?>"><?= h($n['name']) ?></span></td>
+            <td><?= h($n['pc_name']) ?></td></tr>
       <?php endforeach; ?>
       </tbody>
     </table>
@@ -370,7 +372,9 @@ function renderRank(array $list, string $seg, string $kind): string
         $w = $max > 0 ? max(2, (int) round($c['qty'] / $max * 100)) : 0;
         $h .= '<tr>'
             . '<td class="n dim">' . ($i + 1) . '</td>'
-            . '<td><a href="' . h(rankLink((int) $it['id'])) . '">' . h($it['name']) . '</a></td>'
+            // 菜名过长会把表格撑开，用 CSS 截断并加 title，鼠标悬停可看全名
+            . '<td class="iname"><a href="' . h(rankLink((int) $it['id'])) . '"'
+            . ' title="' . h($it['name']) . '">' . h($it['name']) . '</a></td>'
             . '<td class="dim">' . h($it['pc_name']) . '</td>'
             . '<td class="n strong">' . qty($c['qty']) . '</td>'
             . '<td class="n">' . num($c['times']) . '</td>'
