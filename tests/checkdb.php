@@ -45,16 +45,22 @@ if (extension_loaded('pdo')) {
     errmsg('pdo 扩展未加载');
 }
 
-if (extension_loaded('pdo_mysql')) {
-    okmsg('pdo_mysql 扩展已加载');
-    $drv = PDO::getAvailableDrivers();
-    okmsg('可用 PDO 驱动: ' . implode(', ', $drv));
-    // 这个常量只有 mysqlnd 编译的 pdo_mysql 才有，缺了不影响使用
-    okmsg('MYSQL_ATTR_MULTI_STATEMENTS 常量: '
-        . (defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')
-            ? '存在' : '不存在（属正常，程序已自动跳过，不影响功能）'));
+// 本程序支持 PDO 与 mysqli 两种驱动，有一个能用就行
+okmsg('pdo_mysql 扩展: ' . (extension_loaded('pdo_mysql') ? '已加载' : '未加载'));
+okmsg('mysqli   扩展: ' . (extension_loaded('mysqli') ? '已加载' : '未加载'));
+okmsg('mbstring 扩展: ' . (extension_loaded('mbstring') ? '已加载' : '未加载（本程序不依赖，无影响）'));
+
+$have      = Db::availableDrivers();
+$cfgDriver = Db::config()['driver'] ?? 'auto';
+if ($have) {
+    $pick = $cfgDriver === 'auto' ? $have[0] . '（自动选择）' : $cfgDriver . '（config.php 指定）';
+    okmsg('可用驱动: ' . implode(', ', $have) . '　→ 将使用 ' . $pick);
+    if ($cfgDriver !== 'auto' && !in_array($cfgDriver, $have, true)) {
+        errmsg("config.php 里指定的 driver = {$cfgDriver} 不可用");
+    }
 } else {
-    errmsg('pdo_mysql 扩展未加载 —— 请在 php.ini 启用 extension=pdo_mysql 后重启 Web 服务');
+    errmsg('pdo_mysql 和 mysqli 都未加载 —— 请在 php.ini 启用其中之一'
+        . '（推荐 extension=mysqli），改完重启 Web 服务。详见 tests/env.php');
 }
 
 // =====================================================================
@@ -254,8 +260,13 @@ if (!empty($results['菜品汇总']) && !empty($results['菜品字典'])) {
     $top = Report::rank($b['items'], 'total', 'desc', 3);
     echo "\n  近 7 天点单最多的 3 个菜:\n";
     foreach ($top as $i => $it) {
+        // 不用 mb_strimwidth —— 很多环境没有启用 mbstring 扩展
+        $nm = preg_replace('/^(.{0,38}).*$/us', '$1', (string) $it['name']);
+        if ($nm !== $it['name']) {
+            $nm .= '…';
+        }
         printf("    %d. %-40s %8s 份   [%s]\n",
-            $i + 1, mb_strimwidth($it['name'], 0, 40, '…'), $it['total']['qty'], $it['pc_name']);
+            $i + 1, $nm, $it['total']['qty'], $it['pc_name']);
     }
     $noPc = count(array_filter($b['items'], fn($x) => $x['pc_name'] === '未分配岗位'));
     if ($noPc > 0) {

@@ -101,6 +101,75 @@ throws('拒绝非法表名', static fn() => Biz::buildSalesSql($from, $to, 'orde
 throws('拒绝未授权表名', static fn() => Biz::buildDishTotalsSql($from, $to, 'employee'));
 
 // =====================================================================
+echo "\n【2b】mysqli 驱动的占位符转换\n";
+// 关键风险：SQL 里有 '08:00:00' 这类时间常量，里面全是冒号。
+// 转换 :name 占位符时必须跳过引号内的内容，否则会把 :00 当成参数。
+// =====================================================================
+
+[$q, $v] = MysqliDriver::toPositional(
+    "SELECT * FROM t WHERE a >= :from AND a < :to AND TIME(x) >= '08:00:00'",
+    [':from' => 'F', ':to' => 'T']
+);
+eq('时间常量里的冒号未被误认',
+   $q, "SELECT * FROM t WHERE a >= ? AND a < ? AND TIME(x) >= '08:00:00'");
+eq('参数顺序正确', $v, ['F', 'T']);
+
+[$q2, $v2] = MysqliDriver::toPositional(
+    "SELECT CASE WHEN TIME(c) >= '08:00:00' AND TIME(c) < '17:30:00' THEN 'day'
+                 WHEN TIME(c) >= '18:00:00' OR TIME(c) < '02:00:00' THEN 'night'
+            END FROM t WHERE c >= :from AND c < :to AND id = :item",
+    [':from' => 'F', ':to' => 'T', ':item' => 431]
+);
+eq('多个时间常量场景下参数个数正确', count($v2), 3);
+eq('多个时间常量场景下参数值正确', $v2, ['F', 'T', 431]);
+foreach (["'08:00:00'", "'17:30:00'", "'18:00:00'", "'02:00:00'", "'day'", "'night'"] as $lit) {
+    ok("字符串常量 {$lit} 原样保留", strpos($q2, $lit) !== false);
+}
+ok('占位符全部换成 ?', substr_count($q2, '?') === 3 && strpos($q2, ':from') === false);
+
+// 真实 SQL 端到端转换
+foreach ($built as $label => [$rsql, $rparams]) {
+    [$cq, $cv] = MysqliDriver::toPositional($rsql, $rparams);
+    ok("{$label} 转换后无残留命名占位符",
+       !preg_match("/(?<!')\B:[A-Za-z_]\w*/", preg_replace("/'[^']*'/", "''", $cq)));
+    eq("{$label} 参数个数与 ? 个数一致", substr_count($cq, '?'), count($cv));
+}
+
+// 参数缺失要报错，不能悄悄生成错误的 SQL
+throws('缺参数时报错', static fn() => MysqliDriver::toPositional('SELECT :a', []));
+
+// 转义引号不能让解析器跑偏
+[$q3, $v3] = MysqliDriver::toPositional(
+    "SELECT * FROM t WHERE n = 'it\\'s 12:30' AND a = :x", [':x' => 1]
+);
+eq('转义引号内的冒号未被误认', substr_count($q3, '?'), 1);
+eq('转义引号场景参数正确', $v3, [1]);
+
+// =====================================================================
+echo "\n【2c】驱动选择\n";
+// =====================================================================
+
+$have = Db::availableDrivers();
+ok('本机至少有一种可用驱动: ' . (implode(', ', $have) ?: '无'), count($have) > 0);
+foreach ($have as $d) {
+    ok("可用驱动 {$d} 名称合法", in_array($d, ['pdo', 'mysqli'], true));
+}
+ok('PdoDriver 类存在', class_exists('PdoDriver'));
+ok('MysqliDriver 类存在', class_exists('MysqliDriver'));
+ok('两种驱动都实现了 DbDriver 接口',
+   in_array('DbDriver', class_implements('PdoDriver') ?: [], true)
+   && in_array('DbDriver', class_implements('MysqliDriver') ?: [], true));
+
+// 程序不得依赖 mbstring —— 真实环境里常常没启用
+$src = '';
+foreach (['../lib/db.php', '../lib/biz.php', '../lib/report.php', '../lib/view.php',
+          '../index.php', '../dish.php', 'checkdb.php', 'env.php'] as $f) {
+    $src .= (string) file_get_contents(__DIR__ . '/' . $f);
+}
+ok('全程序未使用 mbstring 函数', !preg_match('/\bmb_[a-z_]+\s*\(/', $src));
+ok('全程序未使用 iconv', !preg_match('/\biconv\s*\(/', $src));
+
+// =====================================================================
 echo "\n【3】日期范围换算\n";
 // =====================================================================
 

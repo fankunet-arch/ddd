@@ -39,6 +39,27 @@
 
 无需 Composer，无外部依赖，无需写权限（不产生任何缓存或日志文件）。
 
+### 对 PHP 扩展的要求
+
+只需要 **`pdo_mysql` 或 `mysqli` 其中之一**，有哪个用哪个，`config.php` 里
+`driver => 'auto'` 会自动选（优先 PDO，没有就用 mysqli）。两条路功能完全一致。
+
+所以如果你的环境只装了 `mysqli`，**不需要为了这个程序去改 php.ini**。
+
+不依赖 `mbstring`、`iconv`、`intl`、`curl`、`openssl` 等任何其他扩展。
+
+环境诊断（完全独立，不依赖任何数据库扩展，一定跑得起来）：
+
+```bash
+php tests/env.php
+```
+
+它会报出：PHP 读的是哪个 php.ini、扩展目录在哪、目录里有哪些数据库扩展文件、
+哪些扩展加载了、程序能不能跑、以及出 500 时去哪里找真正的错误。
+
+> **命令行和 Web 服务器往往用不同的 php.ini**，所以请在浏览器里也访问一次
+> `tests/env.php`，对比两边报出的路径 —— 改错文件是"改了没效果"最常见的原因。
+
 ### 部署后先跑体检
 
 ```bash
@@ -192,21 +213,34 @@ lib/report.php      汇总、排行计算（纯内存，不访问数据库）
 lib/view.php        页面公共组件
 assets/app.css      样式
 assets/app.js       菜品搜索下拉框（字典随页面下发，搜索全在浏览器完成）
-tests/checkdb.php   环境与数据库连接体检（需要数据库）
+tests/env.php       PHP 环境诊断（完全独立，不依赖任何扩展）
+tests/checkdb.php   数据库连接与数据体检（需要数据库）
 tests/selftest.php  逻辑自检（不需要数据库）
 ```
+
+`lib/db.php` 里 `PdoDriver` 和 `MysqliDriver` 两个类实现同一个 `DbDriver` 接口，
+上层代码只认 `Db::select()`，完全不感知底层用的是哪个扩展。
+mysqli 不支持 `:name` 命名参数，驱动内部会转换成 `?` 位置参数 ——
+转换时会跳过单引号字符串，避免把 `'08:00:00'` 里的冒号误当成占位符（有专门的测试覆盖）。
 
 ## 八、常见问题
 
 **`Undefined constant PDO::MYSQL_ATTR_MULTI_STATEMENTS`**
 
-pdo_mysql 如果是基于 libmysqlclient（而非 mysqlnd）编译的，就不会注册这个常量。
-程序已用 `defined()` 判断后再使用，缺了不影响功能 —— 真正拦截多语句的是
-SQL 里的分号检查。跑 `php tests/checkdb.php` 第 1 节可以看到你的环境有没有这个常量。
+这个常量由 pdo_mysql 扩展注册，扩展没加载时它就不存在。程序已改成
+`defined()` 判断后再使用，缺了不影响功能 —— 真正拦截多语句的是 SQL 里的分号检查。
 
-**`could not find driver`**
+**`could not find driver` / 没有可用的 MySQL 扩展**
 
-PHP 没加载 pdo_mysql 扩展。在 php.ini 里启用 `extension=pdo_mysql` 后重启 Web 服务。
+pdo_mysql 和 mysqli 都没加载。**启用 `extension=mysqli` 就够了**，不必启用 pdo_mysql。
+
+**启用 `extension=pdo_mysql` 后 Web 服务器返回 500**
+
+不用管它 —— 把这行改回注释状态，只要 `extension=mysqli` 是启用的，程序照常工作。
+
+如果你确实想查 500 的原因，跑 `php tests/env.php`，它会列出扩展目录里实际有哪些
+文件。Windows 上最常见的原因是 `C:\php…\ext\php_pdo_mysql.dll` 不存在，
+或者 dll 的线程安全模式（TS/NTS）与 PHP 本体不匹配。
 
 **页面能打开但查不出数据**
 
