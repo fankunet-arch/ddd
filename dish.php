@@ -18,6 +18,7 @@ $today = date('Y-m-d', time() - Db::config()['day_cut_hour'] * 3600);
 $start = q('start', $today);
 $end   = q('end', $today);
 $seg   = q('seg', 'total');            // 排行按哪个时段
+$pcFilter = q('pc');                   // '' = 全部岗位，或岗位 ID，或 'none' = 未分配
 $mode  = q('mode', 'rank');            // rank = 排行榜, item = 单个菜品
 $itemId      = (int) q('item_id', '0');
 $includeCombo = qbool('include_combo_child');
@@ -132,6 +133,16 @@ pageHeader('菜品点单统计', 'dish');
         <option value="night" <?= $seg === 'night' ? 'selected' : '' ?>>晚上</option>
       </select>
     </label>
+    <label>岗位
+      <select name="pc">
+        <option value="" <?= $pcFilter === '' ? 'selected' : '' ?>>全部岗位（逐个列出）</option>
+        <?php foreach ($printClasses as $pcId => $pcName): ?>
+          <option value="<?= (int) $pcId ?>" <?= $pcFilter === (string) $pcId ? 'selected' : '' ?>>
+            <?= h($pcName) ?></option>
+        <?php endforeach; ?>
+        <option value="none" <?= $pcFilter === 'none' ? 'selected' : '' ?>>未分配岗位</option>
+      </select>
+    </label>
   </div>
 
   <div class="row">
@@ -184,9 +195,9 @@ pageHeader('菜品点单统计', 'dish');
   <?php else: ?>
   <div class="tablewrap">
   <table class="grid">
-    <thead><tr><th>营业日</th><th>白天</th><th>晚上</th>
-      <?php if ($T['gap'] > 0): ?><th>时段外</th><?php endif; ?>
-      <th>合计</th><th>下单次数</th><th>金额</th></tr></thead>
+    <thead><tr><th>营业日</th><th class="n">白天</th><th class="n">晚上</th>
+      <?php if ($T['gap'] > 0): ?><th class="n">时段外</th><?php endif; ?>
+      <th class="n">合计</th><th class="n">下单次数</th><th class="n">金额</th></tr></thead>
     <tbody>
     <?php foreach ($itemRows['days'] as $d => $c): ?>
       <tr>
@@ -213,39 +224,93 @@ pageHeader('菜品点单统计', 'dish');
 <?php elseif ($dishes !== null):
   $items = $dishes['items'];
   $segLabel = ['day' => '白天', 'night' => '晚上', 'total' => '全天'][$seg];
-  $top    = Report::rank($items, $seg, 'desc', 10);
-  $bottom = Report::rank($items, $seg, 'asc', 10);
-  $stations = Report::byStation($items, $seg, 10);
-  $g = $dishes['grand'][$seg];
+
+  // 选了具体岗位就只统计该岗位的菜品，否则统计全店
+  $scoped   = $pcFilter === '' ? $items : Report::filterByStation($items, $pcFilter);
+  $scopeName = $pcFilter === ''
+      ? '全店'
+      : ($pcFilter === 'none' ? '未分配岗位' : ($printClasses[(int) $pcFilter] ?? ('岗位#' . $pcFilter)));
+
+  $top    = Report::rank($scoped, $seg, 'desc', 10);
+  $bottom = Report::rank($scoped, $seg, 'asc', 10);
+  $summary  = Report::stationSummary($items, $seg);
+  $stations = $pcFilter === '' ? Report::byStation($items, $seg, 10) : [];
+
+  $g = ['qty' => 0.0, 'times' => 0, 'amount' => 0.0];
+  foreach ($scoped as $it) {
+      $g['qty']    += $it[$seg]['qty'];
+      $g['times']  += $it[$seg]['times'];
+      $g['amount'] += $it[$seg]['amount'];
+  }
 ?>
   <p class="meta">
     统计时段：<strong><?= h($segLabel) ?></strong>　|
-    有点单记录的菜品 <strong><?= num(count(array_filter($items, fn($i) => $i[$seg]['qty'] > 0))) ?></strong> 个　|
+    统计范围：<strong><?= h($scopeName) ?></strong>　|
+    有点单记录的菜品 <strong><?= num(count(array_filter($scoped, fn($i) => $i[$seg]['qty'] > 0))) ?></strong> 个　|
     总点单量 <strong><?= qty($g['qty']) ?></strong>　|
     总下单次数 <?= num($g['times']) ?>
   </p>
 
-  <h2>点单最多的 10 个菜品</h2>
+  <h2><?= h($scopeName) ?> —— 点单最多的 10 个菜品</h2>
   <?= renderRank($top, $seg, 'top') ?>
 
-  <h2>点单最少的 10 个菜品</h2>
+  <h2><?= h($scopeName) ?> —— 点单最少的 10 个菜品</h2>
   <p class="note">仅统计范围内<strong>有过点单记录</strong>的菜品。完全没被点过的菜品请勾选「显示零点单菜品」。</p>
   <?= renderRank($bottom, $seg, 'bottom') ?>
 
-  <h2>各岗位点单排行</h2>
-  <?php if (!$stations): ?>
-    <p class="empty">无数据。</p>
+  <h2>岗位汇总</h2>
+  <?php if (!$summary): ?>
+    <p class="empty">所选范围内没有任何岗位的点单记录。</p>
   <?php else: ?>
-    <?php foreach ($stations as $st): ?>
-      <details class="station" open>
-        <summary><span class="pcname"><?= h($st['pc_name']) ?></span>
-          <span class="pcmeta"><?= num($st['items']) ?> 个菜品 / 点单 <?= qty($st['qty']) ?></span></summary>
-        <div class="cols">
-          <div><h4>最多 10 个</h4><?= renderRank($st['top'], $seg, 'top') ?></div>
-          <div><h4>最少 10 个</h4><?= renderRank($st['bottom'], $seg, 'bottom') ?></div>
-        </div>
-      </details>
-    <?php endforeach; ?>
+    <div class="tablewrap">
+    <table class="grid">
+      <thead><tr><th>岗位</th><th class="n">菜品数</th><th class="n">点单量</th><th class="n">占比</th><th class="n">下单次数</th><th class="n">金额</th><th>操作</th></tr></thead>
+      <tbody>
+      <?php $allQty = array_sum(array_column($summary, 'qty')); ?>
+      <?php foreach ($summary as $s): ?>
+        <tr>
+          <td><strong><?= h($s['pc_name']) ?></strong></td>
+          <td class="n"><?= num($s['items']) ?></td>
+          <td class="n strong"><?= qty($s['qty']) ?></td>
+          <td class="n"><?= $allQty > 0 ? number_format($s['qty'] / $allQty * 100, 1) . '%' : '—' ?></td>
+          <td class="n"><?= num($s['times']) ?></td>
+          <td class="n"><?= money($s['amount']) ?></td>
+          <td><a href="<?= h(stationLink($s['pc'])) ?>">只看这个岗位</a></td>
+        </tr>
+      <?php endforeach; ?>
+      </tbody>
+      <tfoot><tr>
+        <th>合计 <?= num(count($summary)) ?> 个岗位</th>
+        <th class="n"><?= num(array_sum(array_column($summary, 'items'))) ?></th>
+        <th class="n"><?= qty($allQty) ?></th>
+        <th class="n">100%</th>
+        <th class="n"><?= num(array_sum(array_column($summary, 'times'))) ?></th>
+        <th class="n"><?= money(array_sum(array_column($summary, 'amount'))) ?></th>
+        <th></th>
+      </tr></tfoot>
+    </table>
+    </div>
+  <?php endif; ?>
+
+  <?php if ($pcFilter === ''): ?>
+    <h2>各岗位点单排行（最多 / 最少各 10 个）</h2>
+    <?php if (!$stations): ?>
+      <p class="empty">所选范围内没有任何岗位的点单记录。</p>
+    <?php else: ?>
+      <?php foreach ($stations as $st): ?>
+        <details class="station" open>
+          <summary><span class="pcname"><?= h($st['pc_name']) ?></span>
+            <span class="pcmeta"><?= num($st['items']) ?> 个菜品 / 点单 <?= qty($st['qty']) ?></span></summary>
+          <div class="cols">
+            <div><h4>最多 10 个</h4><?= renderRank($st['top'], $seg, 'top') ?></div>
+            <div><h4>最少 10 个</h4><?= renderRank($st['bottom'], $seg, 'bottom') ?></div>
+          </div>
+        </details>
+      <?php endforeach; ?>
+    <?php endif; ?>
+  <?php else: ?>
+    <p class="note">当前只统计「<?= h($scopeName) ?>」。
+      把岗位切回<a href="<?= h(stationLink('')) ?>">「全部岗位」</a>可以逐个查看每个岗位的排行。</p>
   <?php endif; ?>
 
   <?php if ($showNever):
@@ -254,7 +319,7 @@ pageHeader('菜品点单统计', 'dish');
     <?php if (!$never): ?><p class="empty">所有菜品在此范围内都有点单。</p><?php else: ?>
     <div class="tablewrap">
     <table class="grid small">
-      <thead><tr><th>编号</th><th>菜品</th><th>岗位</th></tr></thead>
+      <thead><tr><th class="n">编号</th><th>菜品</th><th>岗位</th></tr></thead>
       <tbody>
       <?php foreach ($never as $n): ?>
         <tr><td class="n dim"><?= (int) $n['id'] ?></td><td><?= h($n['name']) ?></td><td><?= h($n['pc_name']) ?></td></tr>
@@ -297,7 +362,8 @@ function renderRank(array $list, string $seg, string $kind): string
         $max = max($max, (float) $it[$seg]['qty']);
     }
     $h = '<div class="tablewrap"><table class="grid rank"><thead><tr>'
-       . '<th>#</th><th>菜品</th><th>岗位</th><th>点单量</th><th>下单次数</th><th>金额</th><th class="barcol"></th>'
+       . '<th class="n">#</th><th>菜品</th><th>岗位</th><th class="n">点单量</th>'
+       . '<th class="n">下单次数</th><th class="n">金额</th><th class="barcol"></th>'
        . '</tr></thead><tbody>';
     foreach ($list as $i => $it) {
         $c = $it[$seg];
@@ -322,5 +388,16 @@ function rankLink(int $itemId): string
     $qs['mode']    = 'item';
     $qs['item_id'] = $itemId;
     $qs['go']      = '1';
+    return 'dish.php?' . http_build_query($qs);
+}
+
+/** 生成"只看某个岗位"的链接，保留当前日期与时段 */
+function stationLink($pc): string
+{
+    $qs = $_GET;
+    $qs['pc']   = $pc === null ? 'none' : (string) $pc;
+    $qs['mode'] = 'rank';
+    $qs['go']   = '1';
+    unset($qs['item_id']);
     return 'dish.php?' . http_build_query($qs);
 }

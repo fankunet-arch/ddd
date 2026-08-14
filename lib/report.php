@@ -190,6 +190,47 @@ final class Report
     }
 
     /**
+     * 只保留属于指定岗位的菜品。
+     *
+     * @param string $pc 岗位 ID；'none' 表示未分配岗位的菜品
+     */
+    public static function filterByStation(array $items, string $pc): array
+    {
+        return array_filter($items, static function ($it) use ($pc) {
+            return $pc === 'none'
+                ? $it['pc'] === null
+                : (string) $it['pc'] === $pc;
+        });
+    }
+
+    /**
+     * 各岗位汇总概览（不含菜品明细），用于一眼看清岗位分布。
+     *
+     * @return array [ ['pc','pc_name','items','qty','times','amount'], ... ] 按点单量降序
+     */
+    public static function stationSummary(array $items, string $seg): array
+    {
+        $g = [];
+        foreach ($items as $it) {
+            if ($it[$seg]['qty'] <= 0) {
+                continue;
+            }
+            $k = $it['pc'] ?? 'none';
+            if (!isset($g[$k])) {
+                $g[$k] = ['pc' => $it['pc'], 'pc_name' => $it['pc_name'],
+                          'items' => 0, 'qty' => 0.0, 'times' => 0, 'amount' => 0.0];
+            }
+            $g[$k]['items']  += 1;
+            $g[$k]['qty']    += $it[$seg]['qty'];
+            $g[$k]['times']  += $it[$seg]['times'];
+            $g[$k]['amount'] += $it[$seg]['amount'];
+        }
+        $out = array_values($g);
+        usort($out, static fn($a, $b) => $b['qty'] <=> $a['qty']);
+        return $out;
+    }
+
+    /**
      * 范围内一次都没被点过的菜品（做法项除外）。
      * 对"哪些菜该下架"这类问题很有用。
      */

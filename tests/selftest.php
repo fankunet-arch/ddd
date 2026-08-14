@@ -280,6 +280,36 @@ eq('热菜岗位菜品数', $st[0]['items'], 2);
 eq('热菜岗位最多', $st[0]['top'][0]['name'], '2-Takoyaki');
 eq('热菜岗位最少', $st[0]['bottom'][0]['name'], '1-Edamame');
 
+// ---- 按岗位筛选 ----
+$onlyHot = Report::filterByStation($b['items'], '11');
+eq('筛选热菜岗位后的菜品数', count($onlyHot), 2);
+ok('筛选结果只含该岗位', !array_filter($onlyHot, fn($i) => $i['pc'] !== 11));
+$onlyBeb = Report::filterByStation($b['items'], '6');
+eq('筛选 bebidas 岗位后的菜品数', count($onlyBeb), 1);
+eq('筛选后再排行取该岗位第一', Report::rank($onlyBeb, 'total', 'desc', 10)[0]['name'], 'Agua');
+eq('筛选不存在的岗位返回空', count(Report::filterByStation($b['items'], '999')), 0);
+
+// 未分配岗位的菜品要能单独筛出来
+$menu2 = $menu + [777 => ['name' => '没岗位的菜', 'name2' => '', 'print_class' => null, 'is_condiment' => false]];
+$b2 = Report::buildDishes($menu2, $pcs, array_merge($dishRows, [
+    ['menu_item_id' => 777, 'item_name' => '没岗位的菜', 'seg' => 'day', 'qty' => 3, 'times' => 3, 'amount' => 0],
+]));
+$none = Report::filterByStation($b2['items'], 'none');
+eq('未分配岗位可单独筛选', count($none), 1);
+eq('未分配岗位菜品正确', array_values($none)[0]['name'], '没岗位的菜');
+ok('未分配岗位不会混入具体岗位', count(Report::filterByStation($b2['items'], '11')) === 2);
+
+// ---- 岗位汇总 ----
+$sum = Report::stationSummary($b['items'], 'total');
+eq('岗位汇总组数', count($sum), 2);
+eq('汇总按点单量降序', $sum[0]['pc_name'], '热菜');
+eq('热菜岗位点单量 = 35 + 40', $sum[0]['qty'], 75.0);
+eq('热菜岗位菜品数', $sum[0]['items'], 2);
+eq('bebidas 点单量', $sum[1]['qty'], 5.0);
+ok('汇总总量 == 全店总量',
+   abs(array_sum(array_column($sum, 'qty')) - $b['grand']['total']['qty']) < 0.001);
+eq('白天时段汇总只含白天有量的岗位', count(Report::stationSummary($b['items'], 'day')), 1);
+
 $never = Report::neverOrdered($menu, $b['items'], $pcs);
 eq('零点单菜品数', count($never), 1);
 eq('零点单菜品', $never[0]['name'], '从没点过的菜');

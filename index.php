@@ -115,16 +115,16 @@ pageHeader('营业额统计', 'sales');
     <thead>
       <tr>
         <th rowspan="2">营业日</th>
-        <th colspan="3">白天 <span class="sub"><?= h(substr(Db::config()['day_start'], 0, 5)) ?>–<?= h(substr(Db::config()['day_end'], 0, 5)) ?></span></th>
-        <th colspan="3">晚上 <span class="sub"><?= h(substr(Db::config()['night_start'], 0, 5)) ?>–次日<?= h(substr(Db::config()['night_end'], 0, 5)) ?></span></th>
-        <?php if ($showGap): ?><th colspan="3">时段外</th><?php endif; ?>
-        <th colspan="4">全天</th>
+        <th colspan="3" class="c">白天 <span class="sub"><?= h(substr(Db::config()['day_start'], 0, 5)) ?>–<?= h(substr(Db::config()['day_end'], 0, 5)) ?></span></th>
+        <th colspan="3" class="c">晚上 <span class="sub"><?= h(substr(Db::config()['night_start'], 0, 5)) ?>–次日<?= h(substr(Db::config()['night_end'], 0, 5)) ?></span></th>
+        <?php if ($showGap): ?><th colspan="3" class="c">时段外</th><?php endif; ?>
+        <th colspan="4" class="c">全天</th>
       </tr>
       <tr>
-        <th>营业额</th><th>人数</th><th>单数</th>
-        <th>营业额</th><th>人数</th><th>单数</th>
-        <?php if ($showGap): ?><th>营业额</th><th>人数</th><th>单数</th><?php endif; ?>
-        <th>营业额</th><th>人数</th><th>单数</th><th>人均</th>
+        <th class="n">营业额</th><th class="n">人数</th><th class="n">单数</th>
+        <th class="n">营业额</th><th class="n">人数</th><th class="n">单数</th>
+        <?php if ($showGap): ?><th class="n">营业额</th><th class="n">人数</th><th class="n">单数</th><?php endif; ?>
+        <th class="n">营业额</th><th class="n">人数</th><th class="n">单数</th><th class="n">人均</th>
       </tr>
     </thead>
     <tbody>
@@ -160,8 +160,10 @@ pageHeader('营业额统计', 'sales');
   <div class="tablewrap">
   <table class="grid small">
     <thead><tr>
-      <th>时段</th><th>原价合计</th><th>折扣</th><th>服务费</th>
-      <th>应收</th><th>退单</th><th>实收（营业额）</th><th>其中含税</th>
+      <th>时段</th>
+      <th class="n">原价合计</th><th class="n">折扣</th><th class="n">服务费</th>
+      <th class="n">应收</th><th class="n">退单</th>
+      <th class="n">实收（营业额）</th><th class="n">其中含税</th>
     </tr></thead>
     <tbody>
     <?php foreach (['day','night','gap','total'] as $s):
