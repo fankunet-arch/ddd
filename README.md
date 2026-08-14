@@ -39,7 +39,21 @@
 
 无需 Composer，无外部依赖，无需写权限（不产生任何缓存或日志文件）。
 
-自检（不需要连数据库）：
+### 部署后先跑体检
+
+```bash
+php tests/checkdb.php
+```
+
+也可以直接用浏览器访问 `tests/checkdb.php`。它会依次检查：
+PHP 扩展是否齐全、配置是否填好、数据库能否连上、账号是不是只读、
+需要的 6 张表在不在、实时表有多大、数据时间范围、
+以及实跑近 7 天的四条统计查询并报出耗时和结果抽样。
+全程只执行 SELECT。
+
+出问题时它会直接指出是哪一环，比在页面上看一句"查询失败"好定位得多。
+
+### 逻辑自检（不需要连数据库）
 
 ```bash
 php tests/selftest.php
@@ -178,8 +192,26 @@ lib/report.php      汇总、排行计算（纯内存，不访问数据库）
 lib/view.php        页面公共组件
 assets/app.css      样式
 assets/app.js       菜品搜索下拉框（字典随页面下发，搜索全在浏览器完成）
-tests/selftest.php  自检脚本，不需要数据库
+tests/checkdb.php   环境与数据库连接体检（需要数据库）
+tests/selftest.php  逻辑自检（不需要数据库）
 ```
+
+## 八、常见问题
+
+**`Undefined constant PDO::MYSQL_ATTR_MULTI_STATEMENTS`**
+
+pdo_mysql 如果是基于 libmysqlclient（而非 mysqlnd）编译的，就不会注册这个常量。
+程序已用 `defined()` 判断后再使用，缺了不影响功能 —— 真正拦截多语句的是
+SQL 里的分号检查。跑 `php tests/checkdb.php` 第 1 节可以看到你的环境有没有这个常量。
+
+**`could not find driver`**
+
+PHP 没加载 pdo_mysql 扩展。在 php.ini 里启用 `extension=pdo_mysql` 后重启 Web 服务。
+
+**页面能打开但查不出数据**
+
+先跑 `php tests/checkdb.php`，第 7 节会显示数据库里实际的数据时间范围 ——
+很可能是查询的日期超出了这个范围。
 
 ## 七、已知口径说明
 

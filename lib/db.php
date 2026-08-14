@@ -36,19 +36,34 @@ final class Db
     private static function pdo(): PDO
     {
         if (self::$pdo === null) {
+            if (!extension_loaded('pdo_mysql')) {
+                throw new RuntimeException(
+                    'PHP 未加载 pdo_mysql 扩展，无法连接数据库。'
+                    . '请在 php.ini 中启用 extension=pdo_mysql 后重启 Web 服务。'
+                );
+            }
+
             $c = self::config();
             $dsn = sprintf(
                 'mysql:host=%s;port=%d;dbname=%s;charset=%s',
                 $c['host'], $c['port'], $c['dbname'], $c['charset']
             );
-            self::$pdo = new PDO($dsn, $c['user'], $c['pass'], [
+
+            $opts = [
                 PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 // 关闭模拟预处理，让参数真正走服务端绑定
                 PDO::ATTR_EMULATE_PREPARES   => false,
-                // 关键：禁止一次执行多条语句，杜绝语句拼接注入
-                PDO::MYSQL_ATTR_MULTI_STATEMENTS => false,
-            ]);
+            ];
+
+            // 禁止一次执行多条语句。这个常量只有 pdo_mysql 基于 mysqlnd 编译时才存在，
+            // 用 libmysqlclient 编译的环境里没有，所以必须先判断再用。
+            // 真正拦住多语句的是 assertReadOnly() 里的分号检查，此项只是额外加固。
+            if (defined('PDO::MYSQL_ATTR_MULTI_STATEMENTS')) {
+                $opts[PDO::MYSQL_ATTR_MULTI_STATEMENTS] = false;
+            }
+
+            self::$pdo = new PDO($dsn, $c['user'], $c['pass'], $opts);
         }
         return self::$pdo;
     }
