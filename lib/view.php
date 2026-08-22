@@ -68,10 +68,12 @@ function pageHeader(string $title, string $active): void
 <header class="topbar">
   <h1>营业数据查询</h1>
   <nav>
-    <a href="index.php" class="<?= $active === 'sales' ? 'on' : '' ?>">营业额统计</a>
-    <a href="dish.php"  class="<?= $active === 'dish'  ? 'on' : '' ?>">菜品点单统计</a>
+    <a href="index.php"   class="<?= $active === 'sales'   ? 'on' : '' ?>">营业额统计</a>
+    <a href="dish.php"    class="<?= $active === 'dish'    ? 'on' : '' ?>">菜品点单统计</a>
+    <a href="station.php" class="<?= $active === 'station' ? 'on' : '' ?>">岗位单量排名</a>
   </nav>
   <span class="ro">只读模式</span>
+  <a class="logout" href="login.php?action=logout">退出</a>
 </header>
 <main>
     <?php

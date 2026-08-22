@@ -29,6 +29,18 @@ return [
     // 数据库是 MySQL 5.5，建库字符集为 utf8（不是 utf8mb4）
     'charset' => 'utf8',
 
+    // ---------- 登录密码 ----------
+    // 打开任何页面都需要先输入这个密码。
+    //
+    // 两种写法都支持：
+    //   1) 明文，最简单：   'password' => 'abc123',
+    //   2) bcrypt 哈希，更安全（config.php 被人看到也读不出原文）：
+    //      先执行  php -r "echo password_hash('你的密码', PASSWORD_DEFAULT);"
+    //      把输出的一长串（以 $2y$ 开头）填进来即可。
+    //
+    // 留空则任何人都无法登录（不是放行，是全部拒绝）。
+    'password' => '在这里设置登录密码',
+
     // 底层驱动：'auto' | 'pdo' | 'mysqli'
     // auto = 优先用 PDO，没装 pdo_mysql 就自动改用 mysqli。
     // 两者功能完全一致，一般保持 auto 即可；想强制指定时才改。

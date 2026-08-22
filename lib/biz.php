@@ -285,6 +285,86 @@ final class Biz
     }
 
     // ------------------------------------------------------------------
+    // 二之二、岗位（打印机）单量统计  —— 仍然只碰明细表
+    // ------------------------------------------------------------------
+
+    /** 岗位分类里表示「菜品在字典里但没配岗位」和「菜品已从字典删除」 */
+    public const PC_NONE    = -1;
+    public const PC_UNKNOWN = -2;
+
+    /**
+     * 按岗位统计单量。
+     *
+     * 难点：明细表自带的 print_class 字段实测恒为 0/NULL 不可用，岗位只能来自
+     * menu_item.print_class。但「单量」是 COUNT(DISTINCT order_head_id)，
+     * 按菜品分别统计再相加会重复计（同一张单点了同岗位两个菜就算两次），
+     * 必须在数据库端按岗位分组算。
+     *
+     * 做法：把「菜品ID → 岗位」映射编译成 SQL 里的 CASE ... WHEN IN (...) 表达式。
+     * 666 个菜品分成十几个 IN 列表，SQL 文本几 KB，MySQL 处理 IN 列表很快。
+     * 这样既只查明细表一张表、不做 JOIN，又只返回十几行汇总结果，
+     * 不需要把上万行明细拉回 PHP。
+     *
+     * 「单量」= COUNT(DISTINCT order_head_id)，即该岗位出品涉及了多少张单（多少桌）。
+     * 一张单里同岗位点了几个菜也只算一单。
+     *
+     * @param array $pcOfItem  item_id => print_class|null（来自 menuItems()）
+     * @return array 每行 [pc, seg, orders, items, qty, lines_cnt, amount]
+     */
+    public static function stationVolume(string $from, string $to, string $table,
+                                         array $pcOfItem, array $opts = []): array
+    {
+        [$sql, $params] = self::buildStationSql($from, $to, $table, $pcOfItem, $opts);
+        return Db::select($sql, $params);
+    }
+
+    /** 构造岗位单量 SQL。独立出来便于单独校验，不访问数据库。 */
+    public static function buildStationSql(string $from, string $to, string $table,
+                                           array $pcOfItem, array $opts = []): array
+    {
+        $table = self::safeTable($table, ['history_order_detail', 'order_detail']);
+
+        // 按岗位把菜品 ID 归堆。所有 ID 强制转成整数后拼进 SQL，不可能带入非数字内容。
+        $byPc = [];
+        foreach ($pcOfItem as $itemId => $pc) {
+            $id = (int) $itemId;
+            if ($id <= 0) {
+                continue;
+            }
+            $key = $pc === null ? self::PC_NONE : (int) $pc;
+            $byPc[$key][] = $id;
+        }
+
+        $cases = '';
+        foreach ($byPc as $pc => $ids) {
+            $cases .= ' WHEN menu_item_id IN (' . implode(',', $ids) . ') THEN ' . (int) $pc;
+        }
+        // 字典里查不到的菜品（多半是后来被删掉的）单独归一类，不和「未配岗位」混淆
+        $pcExpr = $cases === ''
+            ? (string) self::PC_UNKNOWN
+            : 'CASE' . $cases . ' ELSE ' . self::PC_UNKNOWN . ' END';
+
+        $where  = ['order_time >= :from', 'order_time < :to'];
+        $params = [':from' => $from, ':to' => $to];
+        self::detailFilter($opts, $where);
+        $whereSql = implode(' AND ', $where);
+        $seg      = self::segExpr('order_time');
+
+        $sql = "SELECT {$pcExpr} AS pc,
+                       {$seg}    AS seg,
+                       COUNT(DISTINCT order_head_id) AS orders,
+                       COUNT(DISTINCT menu_item_id)  AS items,
+                       SUM(quantity)                 AS qty,
+                       COUNT(*)                      AS lines_cnt,
+                       SUM(actual_price * quantity)  AS amount
+                FROM {$table}
+                WHERE {$whereSql}
+                GROUP BY pc, seg";
+
+        return [$sql, $params];
+    }
+
+    // ------------------------------------------------------------------
     // 三、字典表  —— 单独查询，内存映射
     // ------------------------------------------------------------------
 

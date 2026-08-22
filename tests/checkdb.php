@@ -10,14 +10,22 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/../lib/auth.php';
+require_once __DIR__ . '/../lib/biz.php';
+require_once __DIR__ . '/../lib/report.php';
+
+// 浏览器访问时要求登录（本页会显示数据库信息）；命令行运行不受影响。
+// 必须在任何输出之前完成，否则 header() 会因为「headers already sent」失效。
 $cli = PHP_SAPI === 'cli';
+if (!$cli && !Auth::isLoggedIn()) {
+    header('Location: ../login.php');
+    exit;
+}
+
 if (!$cli) {
     header('Content-Type: text/html; charset=utf-8');
     echo '<pre style="font:13px/1.6 monospace;padding:16px">';
 }
-
-require_once __DIR__ . '/../lib/biz.php';
-require_once __DIR__ . '/../lib/report.php';
 
 $warn = 0;
 $err  = 0;
@@ -80,7 +88,16 @@ if ((int) substr($cfg['night_end'], 0, 2) !== (int) $cfg['day_cut_hour']) {
     warnmsg('night_end 与 day_cut_hour 不一致，跨夜账单的营业日归属会出错');
 }
 if ($cfg['pass'] === '在这里填密码') {
-    errmsg('config.php 里的密码还没填');
+    errmsg('config.php 里的数据库密码还没填');
+}
+
+// 登录密码。这里只警告不报错 —— 密码没设好也不该妨碍你先把数据库连通性查清楚。
+if (!Auth::isConfigured()) {
+    warnmsg('登录密码 password 还没设置 —— 页面谁都登录不进去，请在 config.php 里补上');
+} elseif (preg_match('/^\$(2[aby]|argon2)/', (string) $cfg['password'])) {
+    okmsg('登录密码: 已设置（bcrypt 哈希）');
+} else {
+    warnmsg('登录密码: 已设置（明文）—— 建议改用哈希，见 README「登录」一节');
 }
 
 if ($err > 0) {

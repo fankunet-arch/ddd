@@ -135,6 +135,25 @@ table.rank .bar.bottom{background:linear-gradient(90deg,#e9b978,#dd9440)}
   .station .cols table.grid td.iname>span{max-width:300px}
 }
 
+/* ---------- 登录页 ---------- */
+.loginpage{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.loginbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:32px 30px;width:100%;max-width:340px;box-shadow:0 10px 40px rgba(20,30,50,.08)}
+.loginbox h1{font-size:19px;margin:0 0 4px;text-align:center}
+.loginbox .sub{margin:0 0 20px;text-align:center;color:var(--dim);font-size:13px}
+.loginbox input[type=password]{width:100%;border:1px solid var(--line);border-radius:6px;
+  padding:10px 12px;font-size:15px;margin-bottom:12px;background:#fff;color:var(--text)}
+.loginbox input[type=password]:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+.loginbox button{width:100%;background:var(--accent);color:#fff;border:0;border-radius:6px;
+  padding:10px;font-size:15px;cursor:pointer}
+.loginbox button:hover{background:#2559c9}
+.loginbox .err{margin:14px 0 0;padding:9px 12px;font-size:13px}
+.loginbox .ok{margin:14px 0 0;padding:9px 12px;font-size:13px;background:#e9f7f0;
+  border:1px solid #b9e3ce;color:var(--ok);border-radius:var(--radius)}
+.loginbox .foot{margin:20px 0 0;font-size:11px;color:var(--dim);text-align:center;line-height:1.5}
+.topbar .logout{color:#8b96a5;font-size:12px;padding:4px 10px;border-radius:6px;margin-left:10px}
+.topbar .logout:hover{background:#2d3a4d;color:#fff;text-decoration:none}
+
 /* ---------- 杂项 ---------- */
 .tag{font-size:12px;background:#eef1f6;color:var(--dim);padding:2px 9px;border-radius:20px;
   vertical-align:middle;font-weight:400}

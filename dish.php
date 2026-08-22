@@ -10,6 +10,9 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/lib/auth.php';
+Auth::requireLogin();
+
 require_once __DIR__ . '/lib/biz.php';
 require_once __DIR__ . '/lib/report.php';
 require_once __DIR__ . '/lib/view.php';

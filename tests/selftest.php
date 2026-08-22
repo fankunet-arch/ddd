@@ -12,6 +12,7 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/../lib/auth.php';
 require_once __DIR__ . '/../lib/biz.php';
 require_once __DIR__ . '/../lib/report.php';
 
@@ -168,6 +169,130 @@ foreach (['../lib/db.php', '../lib/biz.php', '../lib/report.php', '../lib/view.p
 }
 ok('全程序未使用 mbstring 函数', !preg_match('/\bmb_[a-z_]+\s*\(/', $src));
 ok('全程序未使用 iconv', !preg_match('/\biconv\s*\(/', $src));
+
+// =====================================================================
+echo "\n【2d】岗位单量 SQL\n";
+// =====================================================================
+
+// 菜品 → 岗位映射：3 个热菜(11)、2 个饮料(6)、1 个未配岗位
+$pcMap = [1 => 11, 2 => 11, 3 => 11, 431 => 6, 432 => 6, 900 => null];
+[$ssql, $sparams] = Biz::buildStationSql($from, $to, 'history_order_detail', $pcMap);
+
+ok('岗位 SQL 通过只读检查', (static function () use ($ssql) {
+    try { Db::assertReadOnly($ssql); return true; } catch (Throwable $e) { return false; }
+})());
+ok('岗位 SQL 未做 JOIN', stripos($ssql, 'join') === false);
+ok('岗位 SQL 只查明细表', substr_count($ssql, 'history_order_detail') === 1);
+ok('单量用 COUNT(DISTINCT order_head_id)',
+   strpos($ssql, 'COUNT(DISTINCT order_head_id)') !== false);
+ok('热菜岗位的菜品被编进 IN 列表', strpos($ssql, 'IN (1,2,3) THEN 11') !== false);
+ok('饮料岗位的菜品被编进 IN 列表', strpos($ssql, 'IN (431,432) THEN 6') !== false);
+ok('未配岗位归为 ' . Biz::PC_NONE, strpos($ssql, 'IN (900) THEN -1') !== false);
+ok('字典外的菜品归为 ' . Biz::PC_UNKNOWN, strpos($ssql, 'ELSE -2 END') !== false);
+ok('岗位 SQL 走时间索引', strpos($ssql, 'order_time >= :from') !== false);
+ok('岗位 SQL 参数走绑定', !preg_match('/\'20\d\d-\d\d-\d\d /', $ssql));
+eq('岗位 SQL 参数', array_keys($sparams), [':from', ':to']);
+// SQL 里除了绑定参数只能出现数字和岗位 ID，不能混入任何菜名之类的文本
+ok('IN 列表只含数字', !preg_match('/IN \([^)]*[^0-9,)][^)]*\)/', $ssql));
+
+// 映射为空时不能生成语法错误的 CASE
+[$esql] = Biz::buildStationSql($from, $to, 'history_order_detail', []);
+ok('空映射不生成空 CASE', strpos($esql, 'CASE ELSE') === false && strpos($esql, '-2 AS pc') !== false);
+
+// 非法菜品 ID 要被丢弃，不能拼进 SQL
+[$bsql] = Biz::buildStationSql($from, $to, 'history_order_detail',
+    ['5; DROP TABLE x' => 1, '-3' => 1, '0' => 1, 7 => 1]);
+ok('注入文本被 (int) 强转剥掉', strpos($bsql, 'DROP') === false && strpos($bsql, ';') === false);
+ok('负数与 0 的菜品 ID 被剔除', strpos($bsql, '-3') === false && !preg_match('/IN \([^)]*\b0\b/', $bsql));
+ok('合法 ID 保留', strpos($bsql, 'IN (5,7)') !== false);
+ok('剔除后 SQL 仍通过只读检查', (static function () use ($bsql) {
+    try { Db::assertReadOnly($bsql); return true; } catch (Throwable $e) { return false; }
+})());
+
+// ---- 岗位结果聚合与排名 ----
+$pcs2 = [6 => 'bebidas', 11 => '热菜'];
+$stRows = [
+    ['pc' => 11, 'seg' => 'day',   'orders' => 30, 'items' => 3, 'qty' => 50, 'lines_cnt' => 40, 'amount' => 0],
+    ['pc' => 11, 'seg' => 'night', 'orders' => 20, 'items' => 3, 'qty' => 35, 'lines_cnt' => 25, 'amount' => 0],
+    ['pc' => 6,  'seg' => 'day',   'orders' => 45, 'items' => 2, 'qty' => 60, 'lines_cnt' => 55, 'amount' => 180.0],
+    ['pc' => -1, 'seg' => 'day',   'orders' => 2,  'items' => 1, 'qty' => 2,  'lines_cnt' => 2,  'amount' => 0],
+    ['pc' => -2, 'seg' => 'night', 'orders' => 1,  'items' => 1, 'qty' => 1,  'lines_cnt' => 1,  'amount' => 0],
+];
+$stLive = [
+    ['pc' => 11, 'seg' => 'night', 'orders' => 5, 'items' => 1, 'qty' => 6, 'lines_cnt' => 6, 'amount' => 0],
+];
+$sb = Report::buildStations($pcs2, $stRows, $stLive);
+
+eq('岗位数（含未分配与已删除）', count($sb['stations']), 4);
+$byPc = [];
+foreach ($sb['stations'] as $s) { $byPc[$s['pc']] = $s; }
+eq('热菜全天单量 = 30 + 20 + 实时 5', $byPc[11]['total']['orders'], 55);
+eq('热菜白天单量', $byPc[11]['day']['orders'], 30);
+eq('热菜晚上单量 = 20 + 实时 5', $byPc[11]['night']['orders'], 25);
+eq('bebidas 全天单量', $byPc[6]['total']['orders'], 45);
+eq('未分配岗位名称', $byPc[-1]['pc_name'], '未分配岗位');
+eq('已删除菜品名称', $byPc[-2]['pc_name'], '菜品已从菜单删除');
+eq('岗位名来自字典', $byPc[11]['pc_name'], '热菜');
+eq('合计单量', $sb['grand']['total']['orders'], 30 + 20 + 5 + 45 + 2 + 1);
+eq('白天合计单量', $sb['grand']['day']['orders'], 30 + 45 + 2);
+
+$ranked = Report::sortStations($sb['stations'], 'orders');
+eq('按单量排名第 1', $ranked[0]['pc_name'], '热菜');       // 55
+eq('按单量排名第 2', $ranked[1]['pc_name'], 'bebidas');    // 45
+$byQty = Report::sortStations($sb['stations'], 'qty');
+eq('按份数排名第 1', $byQty[0]['pc_name'], '热菜');        // 50+35+6=91 > bebidas 60
+eq('按份数排名第 2', $byQty[1]['pc_name'], 'bebidas');     // 60
+$byAmt = Report::sortStations($sb['stations'], 'amount');
+eq('按金额排名第 1', $byAmt[0]['pc_name'], 'bebidas');     // 180
+ok('非法排序字段回退到单量',
+   Report::sortStations($sb['stations'], '乱写')[0]['pc_name'] === '热菜');
+
+// =====================================================================
+echo "\n【2e】登录\n";
+// =====================================================================
+
+ok('Auth 类存在', class_exists('Auth'));
+ok('config 里有 password 字段', array_key_exists('password', Db::config()));
+
+// 明文密码
+$refl = new ReflectionClass('Db');
+$prop = $refl->getProperty('cfg');
+$prop->setAccessible(true);
+$orig = $prop->getValue();
+
+$prop->setValue(null, array_merge($orig, ['password' => 'plain-secret']));
+ok('明文密码：正确密码通过', Auth::verify('plain-secret'));
+ok('明文密码：错误密码拒绝', !Auth::verify('plain-secre'));
+ok('明文密码：空密码拒绝', !Auth::verify(''));
+ok('明文密码：已配置', Auth::isConfigured());
+
+// bcrypt 哈希密码
+$hash = password_hash('hashed-secret', PASSWORD_DEFAULT);
+$prop->setValue(null, array_merge($orig, ['password' => $hash]));
+ok('哈希密码：正确密码通过', Auth::verify('hashed-secret'));
+ok('哈希密码：错误密码拒绝', !Auth::verify('hashed-secre'));
+ok('哈希密码：不会把哈希本身当密码', !Auth::verify($hash));
+
+// 未配置
+$prop->setValue(null, array_merge($orig, ['password' => '']));
+ok('未设置密码时拒绝一切登录', !Auth::verify('') && !Auth::verify('随便'));
+ok('未设置密码时 isConfigured 为假', !Auth::isConfigured());
+$prop->setValue(null, array_merge($orig, ['password' => '在这里设置登录密码']));
+ok('占位符不算已配置', !Auth::isConfigured());
+
+$prop->setValue(null, $orig);   // 还原
+
+// 所有对外页面都必须挂上登录保护
+foreach (['index.php', 'dish.php', 'station.php'] as $page) {
+    $src = (string) file_get_contents(__DIR__ . '/../' . $page);
+    ok("{$page} 有登录保护", strpos($src, 'Auth::requireLogin()') !== false);
+    ok("{$page} 登录检查在业务逻辑之前",
+       strpos($src, 'Auth::requireLogin()') < strpos($src, 'Biz::'));
+}
+$src = (string) file_get_contents(__DIR__ . '/checkdb.php');
+ok('checkdb.php 有登录保护（命令行除外）', strpos($src, 'Auth::isLoggedIn()') !== false);
+ok('checkdb.php 登录跳转在任何输出之前',
+   strpos($src, "Location: ../login.php") < strpos($src, "echo '<pre"));
 
 // =====================================================================
 echo "\n【3】日期范围换算\n";
