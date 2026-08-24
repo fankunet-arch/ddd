@@ -365,6 +365,114 @@ final class Biz
     }
 
     // ------------------------------------------------------------------
+    // 二之三、开台核对  —— 两张实时表，各查一次
+    // ------------------------------------------------------------------
+
+    /**
+     * 当前已开台的订单（实时表 order_head）。
+     *
+     * 「未结算」判定为 order_end_time IS NULL。同样按 order_head_id 归并，
+     * 因为分单时每个 check 都重复写了相同的 customer_num。
+     *
+     * @param bool $onlyOpen false 时列出实时表里的全部订单（含已结算未日结的），
+     *                       用于核实「未结算 = order_end_time IS NULL」这个假设是否成立
+     * @return array 每行 [order_head_id, t0, guests, table_name, employee,
+     *                     amount, checks, eat_type, status, settled]
+     */
+    public static function openTables(bool $onlyOpen = true): array
+    {
+        [$sql, $params] = self::buildOpenTablesSql($onlyOpen);
+        return Db::select($sql, $params);
+    }
+
+    /** 构造开台列表 SQL。独立出来便于单独校验，不访问数据库。 */
+    public static function buildOpenTablesSql(bool $onlyOpen = true): array
+    {
+        $where = $onlyOpen ? 'WHERE order_end_time IS NULL' : '';
+
+        $sql = "SELECT order_head_id,
+                       MIN(order_start_time)              AS t0,
+                       MAX(customer_num)                  AS guests,
+                       MAX(table_name)                    AS table_name,
+                       MAX(open_employee_name)            AS employee,
+                       SUM(actual_amount)                 AS amount,
+                       COUNT(*)                           AS checks,
+                       MAX(eat_type)                      AS eat_type,
+                       MAX(status)                        AS status,
+                       MAX(order_end_time IS NOT NULL)    AS settled
+                FROM order_head
+                {$where}
+                GROUP BY order_head_id
+                ORDER BY t0";
+
+        return [$sql, []];
+    }
+
+    /**
+     * 这些订单各点了多少份套餐、多少菜（实时表 order_detail）。
+     *
+     * 一次查询同时算出套餐份数与全部菜品数 —— 用 SUM(CASE WHEN ...) 区分，
+     * 不需要为套餐单独跑一遍。
+     *
+     * 注意 order_detail 只有主键、没有 order_head_id 索引，这条查询会全表扫描。
+     * 但只扫一次，且实时表通常只装当前未日结的数据，可以接受。
+     *
+     * @param int[] $orderIds  要查的订单号
+     * @param int[] $comboIds  算作「按人头套餐」的菜品 ID
+     * @return array 每行 [order_head_id, combo_qty, dish_qty, lines_cnt]
+     */
+    public static function orderComboCounts(array $orderIds, array $comboIds): array
+    {
+        if (!$orderIds) {
+            return [];
+        }
+        [$sql, $params] = self::buildComboCountSql($orderIds, $comboIds);
+        return Db::select($sql, $params);
+    }
+
+    /** 构造套餐份数 SQL。所有 ID 强制转整数后拼接，不可能带入非数字内容。 */
+    public static function buildComboCountSql(array $orderIds, array $comboIds): array
+    {
+        $ids = [];
+        foreach ($orderIds as $v) {
+            $n = (int) $v;
+            if ($n > 0) {
+                $ids[$n] = true;
+            }
+        }
+        if (!$ids) {
+            throw new InvalidArgumentException('订单号清单为空');
+        }
+        $idList = implode(',', array_keys($ids));
+
+        $combo = [];
+        foreach ($comboIds as $v) {
+            $n = (int) $v;
+            if ($n > 0) {
+                $combo[$n] = true;
+            }
+        }
+        // 没配套餐清单时套餐份数恒为 0，SQL 仍然合法
+        $comboExpr = $combo
+            ? 'SUM(CASE WHEN menu_item_id IN (' . implode(',', array_keys($combo)) . ') THEN quantity ELSE 0 END)'
+            : '0';
+
+        $sql = "SELECT order_head_id,
+                       {$comboExpr}  AS combo_qty,
+                       SUM(quantity) AS dish_qty,
+                       COUNT(*)      AS lines_cnt
+                FROM order_detail
+                WHERE order_head_id IN ({$idList})
+                  AND menu_item_id > 0
+                  AND quantity > 0
+                  AND (is_return_item IS NULL OR is_return_item = 0)
+                  AND COALESCE(condiment_belong_item, 0) = 0
+                GROUP BY order_head_id";
+
+        return [$sql, []];
+    }
+
+    // ------------------------------------------------------------------
     // 三、字典表  —— 单独查询，内存映射
     // ------------------------------------------------------------------
 
@@ -372,12 +480,12 @@ final class Biz
      * 菜品字典。item_type = 1 的是做法/口味项（如 "S/Pepino" 不要黄瓜），
      * 不是真正的菜，统计时排除。
      *
-     * @return array item_id => ['name'=>..., 'print_class'=>..., 'is_condiment'=>bool]
+     * @return array item_id => ['name'=>..., 'print_class'=>..., 'is_condiment'=>bool, 'price'=>float]
      */
     public static function menuItems(): array
     {
         $rows = Db::select(
-            'SELECT item_id, item_name1, item_name2, print_class, item_type
+            'SELECT item_id, item_name1, item_name2, print_class, item_type, price_1
              FROM menu_item ORDER BY item_id'
         );
         $out = [];
@@ -391,6 +499,7 @@ final class Biz
                 'name2'        => trim((string) $r['item_name2']),
                 'print_class'  => $r['print_class'] === null ? null : (int) $r['print_class'],
                 'is_condiment' => ((int) $r['item_type']) === 1,
+                'price'        => (float) ($r['price_1'] ?? 0),
             ];
         }
         return $out;

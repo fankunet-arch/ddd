@@ -60,4 +60,28 @@ return [
 
     // 查询日期跨度上限（天）。3 个月按 92 天算。
     'max_range_days' => 92,
+
+    // ---------- 开台核对：哪些菜品算「按人头的套餐」 ----------
+    // 「开台核对」页用这个清单去数每桌打了几份套餐，再和开台人数比对。
+    //
+    // 下面是从菜单表里查出来的自助餐套餐（item_type = 0，注意不是 3）：
+    //   1290  MENÚ INFINITY - INFANTIL MEDIODIA            12.90
+    //   1490  MENU INFANTIL NOCHE FINDE SEMANA             14.90
+    //   1590  MENÚ DEL DIA (Lunes - Jueves)                15.90
+    //   1890  MENÚ INFINITY MEDIODIA - ADULTOS             18.90
+    //   2390  MENÚ INFINITY NOCHE LUNES A JUEVES-ADULTOS   23.90
+    //   2590  MENÚ INFINITY VIERNES NOCHE-FIN DE SEMANA    25.90
+    //
+    // 成人餐和儿童餐都要列进来 —— 4 位客人可能是 2 大 2 小，
+    // 加起来仍应是 4 份。
+    //
+    // BOX 1-18 与 COMBO S/M/L/XL（item_type = 3）默认【不】计入：
+    // 那是打包组合，不是按人头点的，算进来会让核对结果失真。
+    //
+    // ⚠️ 换季改菜单、新增套餐后，记得回来更新这个清单。
+    //    「开台核对」页底部会列出当前生效的清单，方便随时核对。
+    'combo_item_ids' => [1290, 1490, 1590, 1890, 2390, 2590],
+
+    // 开台超过这个小时数仍未结账，在核对页里标记出来（可能是忘了关台）
+    'open_table_warn_hours' => 4,
 ];

@@ -68,6 +68,7 @@ function pageHeader(string $title, string $active): void
 <header class="topbar">
   <h1>营业数据查询</h1>
   <nav>
+    <a href="open.php"    class="<?= $active === 'open'    ? 'on' : '' ?>">开台核对</a>
     <a href="index.php"   class="<?= $active === 'sales'   ? 'on' : '' ?>">营业额统计</a>
     <a href="dish.php"    class="<?= $active === 'dish'    ? 'on' : '' ?>">菜品点单统计</a>
     <a href="station.php" class="<?= $active === 'station' ? 'on' : '' ?>">岗位单量排名</a>

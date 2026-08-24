@@ -189,6 +189,127 @@ final class Report
         return $out;
     }
 
+    // ------------------------------------------------------------------
+    // 开台核对
+    // ------------------------------------------------------------------
+
+    public const OPEN_OK      = 'ok';       // 人数与套餐份数一致
+    public const OPEN_SHORT   = 'short';    // 套餐打少了
+    public const OPEN_OVER    = 'over';     // 套餐打多了
+    public const OPEN_NONE    = 'none';     // 一份套餐都没打
+    public const OPEN_NOGUEST = 'noguest';  // 没填人数，没法比对
+
+    /**
+     * 把开台列表和套餐份数合起来，逐桌判断人数与套餐是否对得上。
+     *
+     * @param array $heads   Biz::openTables() 的结果
+     * @param array $counts  Biz::orderComboCounts() 的结果
+     * @param int   $warnHours 开台超过几小时算滞留
+     */
+    public static function buildOpenTables(array $heads, array $counts, int $warnHours = 4): array
+    {
+        $byId = [];
+        foreach ($counts as $c) {
+            $byId[(int) $c['order_head_id']] = $c;
+        }
+
+        $rows = [];
+        $sum  = ['tables' => 0, 'guests' => 0, 'combo' => 0.0, 'amount' => 0.0,
+                 'problem' => 0, 'stale' => 0];
+        $now  = time();
+
+        foreach ($heads as $h) {
+            $id     = (int) $h['order_head_id'];
+            $guests = (int) $h['guests'];
+            $c      = $byId[$id] ?? null;
+            $combo  = $c ? (float) $c['combo_qty'] : 0.0;
+            $dishes = $c ? (float) $c['dish_qty']  : 0.0;
+            $lines  = $c ? (int) $c['lines_cnt']   : 0;
+            $diff   = $combo - $guests;
+
+            if ($guests <= 0) {
+                $state = self::OPEN_NOGUEST;
+            } elseif (abs($diff) < 0.001) {
+                $state = self::OPEN_OK;
+            } elseif ($combo <= 0) {
+                $state = self::OPEN_NONE;
+            } elseif ($diff < 0) {
+                $state = self::OPEN_SHORT;
+            } else {
+                $state = self::OPEN_OVER;
+            }
+
+            $t0   = $h['t0'] ? strtotime((string) $h['t0']) : null;
+            $mins = $t0 ? (int) floor(($now - $t0) / 60) : null;
+            $stale = $mins !== null && $mins >= $warnHours * 60;
+
+            $rows[] = [
+                'id'       => $id,
+                'table'    => (string) ($h['table_name'] ?? ''),
+                'guests'   => $guests,
+                'combo'    => $combo,
+                'diff'     => $diff,
+                'state'    => $state,
+                'dishes'   => $dishes,
+                'lines'    => $lines,
+                'amount'   => (float) $h['amount'],
+                'checks'   => (int) $h['checks'],
+                'eat_type' => (int) $h['eat_type'],
+                'settled'  => !empty($h['settled']),
+                'start'    => (string) ($h['t0'] ?? ''),
+                'minutes'  => $mins,
+                'stale'    => $stale,
+                'employee' => (string) ($h['employee'] ?? ''),
+            ];
+
+            $sum['tables']++;
+            $sum['guests'] += $guests;
+            $sum['combo']  += $combo;
+            $sum['amount'] += (float) $h['amount'];
+            if ($state !== self::OPEN_OK) {
+                $sum['problem']++;
+            }
+            if ($stale) {
+                $sum['stale']++;
+            }
+        }
+
+        return ['rows' => $rows, 'sum' => $sum];
+    }
+
+    /** 问题桌排前面，其次按开台时间；方便一眼看到要处理的 */
+    public static function sortOpenTables(array $rows, bool $problemFirst = true): array
+    {
+        $rank = [
+            self::OPEN_NONE    => 0,
+            self::OPEN_SHORT   => 1,
+            self::OPEN_OVER    => 2,
+            self::OPEN_NOGUEST => 3,
+            self::OPEN_OK      => 4,
+        ];
+        usort($rows, static function ($a, $b) use ($rank, $problemFirst) {
+            if ($problemFirst) {
+                $cmp = ($rank[$a['state']] ?? 9) <=> ($rank[$b['state']] ?? 9);
+                if ($cmp !== 0) {
+                    return $cmp;
+                }
+            }
+            return strcmp($a['start'], $b['start']);
+        });
+        return $rows;
+    }
+
+    public static function openStateLabel(string $state): string
+    {
+        return [
+            self::OPEN_OK      => '一致',
+            self::OPEN_SHORT   => '套餐打少了',
+            self::OPEN_OVER    => '套餐打多了',
+            self::OPEN_NONE    => '未打套餐',
+            self::OPEN_NOGUEST => '未填人数',
+        ][$state] ?? $state;
+    }
+
     /** 岗位单量统计的空单元 */
     private static function zeroStation(): array
     {

@@ -248,6 +248,119 @@ ok('非法排序字段回退到单量',
    Report::sortStations($sb['stations'], '乱写')[0]['pc_name'] === '热菜');
 
 // =====================================================================
+echo "\n【2f】开台核对\n";
+// =====================================================================
+
+[$osql, $oparams] = Biz::buildOpenTablesSql(true);
+ok('开台 SQL 通过只读检查', (static function () use ($osql) {
+    try { Db::assertReadOnly($osql); return true; } catch (Throwable $e) { return false; }
+})());
+ok('只查 order_head 一张表',
+   substr_count($osql, 'FROM order_head') === 1 && stripos($osql, 'join') === false);
+ok('未结算判定为 order_end_time IS NULL', strpos($osql, 'order_end_time IS NULL') !== false);
+ok('按订单归并去重人数',
+   strpos($osql, 'MAX(customer_num)') !== false && strpos($osql, 'GROUP BY order_head_id') !== false);
+[$asql] = Biz::buildOpenTablesSql(false);
+ok('查全部时不加未结算条件', strpos($asql, 'order_end_time IS NULL') === false);
+
+[$csql] = Biz::buildComboCountSql([101, 102], [1890, 2390]);
+ok('套餐份数 SQL 通过只读检查', (static function () use ($csql) {
+    try { Db::assertReadOnly($csql); return true; } catch (Throwable $e) { return false; }
+})());
+ok('只查 order_detail 一张表',
+   substr_count($csql, 'FROM order_detail') === 1 && stripos($csql, 'join') === false);
+ok('订单号编进 IN 列表', strpos($csql, 'IN (101,102)') !== false);
+ok('套餐份数与总菜品数一次查出',
+   strpos($csql, 'IN (1890,2390) THEN quantity') !== false && strpos($csql, 'SUM(quantity) AS dish_qty') !== false);
+ok('套餐清单为空时份数恒为 0',
+   strpos(Biz::buildComboCountSql([101], [])[0], '0  AS combo_qty') !== false);
+[$isql] = Biz::buildComboCountSql(['5; DROP TABLE x', -1, 0, 9], ['7; DELETE', 1890]);
+ok('订单号里的注入文本被剥掉', strpos($isql, 'DROP') === false && strpos($isql, 'DELETE') === false);
+ok('非法订单号被剔除', strpos($isql, 'IN (5,9)') !== false);
+throws('订单号全非法时报错', static fn() => Biz::buildComboCountSql([0, -1], [1890]));
+
+// ---- 逐桌比对 ----
+$heads = [
+    // 4 人打了 4 份 —— 一致
+    ['order_head_id' => 1, 't0' => date('Y-m-d H:i:s', time() - 1800), 'guests' => 4,
+     'table_name' => '51', 'employee' => 'Jefe', 'amount' => 95.6, 'checks' => 1,
+     'eat_type' => 0, 'status' => 0, 'settled' => 0],
+    // 4 人只打了 2 份 —— 少了
+    ['order_head_id' => 2, 't0' => date('Y-m-d H:i:s', time() - 3600), 'guests' => 4,
+     'table_name' => '52', 'employee' => 'Jefe', 'amount' => 47.8, 'checks' => 1,
+     'eat_type' => 0, 'status' => 0, 'settled' => 0],
+    // 2 人一份没打 —— 未打套餐
+    ['order_head_id' => 3, 't0' => date('Y-m-d H:i:s', time() - 600), 'guests' => 2,
+     'table_name' => '53', 'employee' => 'A', 'amount' => 5.9, 'checks' => 1,
+     'eat_type' => 0, 'status' => 0, 'settled' => 0],
+    // 2 人打了 3 份 —— 多了
+    ['order_head_id' => 4, 't0' => date('Y-m-d H:i:s', time() - 900), 'guests' => 2,
+     'table_name' => '54', 'employee' => 'B', 'amount' => 71.7, 'checks' => 1,
+     'eat_type' => 0, 'status' => 0, 'settled' => 0],
+    // 没填人数
+    ['order_head_id' => 5, 't0' => date('Y-m-d H:i:s', time() - 300), 'guests' => 0,
+     'table_name' => 'Llevar', 'employee' => 'C', 'amount' => 20.0, 'checks' => 1,
+     'eat_type' => 3, 'status' => 0, 'settled' => 0],
+    // 开台 6 小时还没结 —— 滞留
+    ['order_head_id' => 6, 't0' => date('Y-m-d H:i:s', time() - 6 * 3600), 'guests' => 2,
+     'table_name' => '55', 'employee' => 'D', 'amount' => 47.8, 'checks' => 2,
+     'eat_type' => 0, 'status' => 0, 'settled' => 0],
+];
+$counts = [
+    ['order_head_id' => 1, 'combo_qty' => 4, 'dish_qty' => 12, 'lines_cnt' => 10],
+    ['order_head_id' => 2, 'combo_qty' => 2, 'dish_qty' => 8,  'lines_cnt' => 7],
+    // 3 号桌只点了水，没有套餐行 —— 明细里查得到但 combo_qty 为 0
+    ['order_head_id' => 3, 'combo_qty' => 0, 'dish_qty' => 2,  'lines_cnt' => 2],
+    ['order_head_id' => 4, 'combo_qty' => 3, 'dish_qty' => 9,  'lines_cnt' => 8],
+    ['order_head_id' => 5, 'combo_qty' => 1, 'dish_qty' => 3,  'lines_cnt' => 3],
+    ['order_head_id' => 6, 'combo_qty' => 2, 'dish_qty' => 6,  'lines_cnt' => 5],
+];
+$ot = Report::buildOpenTables($heads, $counts, 4);
+$by = [];
+foreach ($ot['rows'] as $r) { $by[$r['id']] = $r; }
+
+eq('4人4份 → 一致',       $by[1]['state'], Report::OPEN_OK);
+eq('4人2份 → 套餐打少了', $by[2]['state'], Report::OPEN_SHORT);
+eq('2人0份 → 未打套餐',   $by[3]['state'], Report::OPEN_NONE);
+eq('2人3份 → 套餐打多了', $by[4]['state'], Report::OPEN_OVER);
+eq('没填人数 → 未填人数', $by[5]['state'], Report::OPEN_NOGUEST);
+eq('少打的差额为负', $by[2]['diff'], -2.0);
+eq('多打的差额为正', $by[4]['diff'], 1.0);
+eq('一致的差额为零', $by[1]['diff'], 0.0);
+
+ok('开台 6 小时标记为滞留', $by[6]['stale']);
+ok('开台半小时不算滞留', !$by[1]['stale']);
+eq('已开台分钟数约 60', (int) round($by[2]['minutes'] / 10) * 10, 60);
+
+eq('开台数', $ot['sum']['tables'], 6);
+eq('人数合计', $ot['sum']['guests'], 4 + 4 + 2 + 2 + 0 + 2);
+eq('套餐份数合计', $ot['sum']['combo'], 4 + 2 + 0 + 3 + 1 + 2);
+// 1 号（4人4份）与 6 号（2人2份）份数都一致，只有 2/3/4/5 号有问题。
+// 6 号虽然开台超时，但那是另一个维度，不算份数问题。
+eq('需要核对的台数', $ot['sum']['problem'], 4);
+eq('6 号桌份数一致', $by[6]['state'], Report::OPEN_OK);
+ok('滞留与份数问题互相独立', $by[6]['stale'] && $by[6]['state'] === Report::OPEN_OK);
+eq('滞留台数', $ot['sum']['stale'], 1);
+
+// 明细表里完全没有记录的订单（刚开台还没下单）也要出现，且算作未打套餐
+$ot2 = Report::buildOpenTables([$heads[0]], []);
+eq('无任何明细的台仍会列出', count($ot2['rows']), 1);
+eq('无明细 → 套餐份数 0', $ot2['rows'][0]['combo'], 0.0);
+eq('无明细 → 判为未打套餐', $ot2['rows'][0]['state'], Report::OPEN_NONE);
+
+// 排序：问题台排前面
+$sorted = Report::sortOpenTables($ot['rows']);
+eq('排序后第一个是未打套餐', $sorted[0]['state'], Report::OPEN_NONE);
+eq('排序后最后一个是一致的', end($sorted)['state'], Report::OPEN_OK);
+$byTime = Report::sortOpenTables($ot['rows'], false);
+ok('关闭问题优先后按开台时间排', $byTime[0]['start'] <= $byTime[1]['start']);
+
+foreach ([Report::OPEN_OK, Report::OPEN_SHORT, Report::OPEN_OVER,
+          Report::OPEN_NONE, Report::OPEN_NOGUEST] as $st) {
+    ok("状态 {$st} 有中文标签", Report::openStateLabel($st) !== $st);
+}
+
+// =====================================================================
 echo "\n【2e】登录\n";
 // =====================================================================
 

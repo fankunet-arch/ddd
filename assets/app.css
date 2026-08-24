@@ -135,6 +135,22 @@ table.rank .bar.bottom{background:linear-gradient(90deg,#e9b978,#dd9440)}
   .station .cols table.grid td.iname>span{max-width:300px}
 }
 
+/* ---------- 开台核对 ---------- */
+.card.bad{border-top-color:var(--err)}
+.card.good{border-top-color:var(--ok)}
+.state{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;white-space:nowrap}
+.state.s-ok{background:#e9f7f0;color:#1d7a4f}
+.state.s-short{background:#fdeceb;color:#a8342c}
+.state.s-none{background:#fdeceb;color:#a8342c;font-weight:600}
+.state.s-over{background:#fff4e3;color:#9a6212}
+.state.s-noguest{background:#eef1f6;color:var(--dim)}
+table.grid tr.row-bad td{background:#fef7f6}
+table.grid tr.row-bad:hover td{background:#fdeeec}
+table.grid tr.row-warn td{background:#fffbf4}
+table.grid tr.row-warn:hover td{background:#fff5e8}
+table.grid .stale{color:var(--err);font-weight:650}
+.note .state{margin:0 2px}
+
 /* ---------- 登录页 ---------- */
 .loginpage{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
 .loginbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;
