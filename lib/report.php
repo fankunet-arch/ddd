@@ -312,7 +312,13 @@ final class Report
                     return $ra <=> $rb;
                 }
             }
-            return strcmp($a['start'], $b['start']);
+            // 组内按桌号排，方便照着桌号找。用自然排序，这样 2 排在 10 前面，
+            // 而不是字符串序把 10 排到 2 前面；纯数字桌号会自动排在文字桌号之前。
+            $cmp = strnatcasecmp($a['table'], $b['table']);
+            if ($cmp !== 0) {
+                return $cmp;
+            }
+            return strcmp($a['start'], $b['start']);   // 桌号相同再按开台时间，保证顺序稳定
         });
         return $rows;
     }

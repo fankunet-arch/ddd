@@ -353,8 +353,11 @@ eq('无明细 → 判为未打套餐', $ot2['rows'][0]['state'], Report::OPEN_NO
 $sorted = Report::sortOpenTables($ot['rows']);
 eq('排序后第一个是未打套餐', $sorted[0]['state'], Report::OPEN_NONE);
 eq('排序后最后一个是一致的', end($sorted)['state'], Report::OPEN_OK);
-$byTime = Report::sortOpenTables($ot['rows'], false);
-ok('关闭问题优先后按开台时间排', $byTime[0]['start'] <= $byTime[1]['start']);
+// 关闭问题优先后整体按桌号排（桌号 51~55 与 Llevar）
+$byTbl = Report::sortOpenTables($ot['rows'], false);
+ok('关闭问题优先后按桌号排',
+   strnatcasecmp($byTbl[0]['table'], $byTbl[1]['table']) <= 0);
+eq('关闭问题优先后第一个是最小桌号', $byTbl[0]['table'], '51');
 
 foreach ([Report::OPEN_OK, Report::OPEN_SHORT, Report::OPEN_OVER,
           Report::OPEN_NONE, Report::OPEN_NOGUEST] as $st) {
@@ -453,6 +456,48 @@ eq('排序：已确认的排中间', $sorted2[1]['table'], 'C');
 eq('排序：一致的排最后', $sorted2[2]['table'], 'A');
 eq('混合场景待处理计数', $mixed['sum']['problem'], 1);
 eq('混合场景已确认计数', $mixed['sum']['acked'], 1);
+
+// ---- 组内按桌号自然排序 ----
+$mkHead = static fn($id, $tbl, $g) => [
+    'order_head_id' => $id, 't0' => '2026-08-25 19:0' . ($id % 10) . ':00',
+    'guests' => $g, 'table_name' => $tbl, 'employee' => '', 'amount' => 0,
+    'checks' => 1, 'eat_type' => 0, 'status' => 0, 'settled' => 0,
+];
+$mkCnt = static fn($id, $c) => ['order_head_id' => $id, 'combo_qty' => $c,
+                                'dish_qty' => 3, 'lines_cnt' => 3];
+// 4 张正常台（桌号 10 / 2 / 9 / A10 / A2 / Llevar）+ 2 张问题台（51 / 7）
+$sortHeads = [$mkHead(1, '10', 2), $mkHead(2, '2', 2), $mkHead(3, '9', 2),
+              $mkHead(4, '51', 4), $mkHead(5, '7', 4),
+              $mkHead(6, 'Llevar', 2), $mkHead(7, 'A2', 2), $mkHead(8, 'A10', 2)];
+$sortCnts = [$mkCnt(1, 2), $mkCnt(2, 2), $mkCnt(3, 2),
+             $mkCnt(4, 0), $mkCnt(5, 0),
+             $mkCnt(6, 2), $mkCnt(7, 2), $mkCnt(8, 2)];
+$sortRes = Report::sortOpenTables(
+    Report::buildOpenTables($sortHeads, $sortCnts, 4)['rows']);
+$order = array_column($sortRes, 'table');
+
+eq('问题台排最前且按桌号排', array_slice($order, 0, 2), ['7', '51']);
+eq('正常台按桌号自然排序', array_slice($order, 2), ['2', '9', '10', 'A2', 'A10', 'Llevar']);
+ok('数字桌号 10 排在 9 之后（不是字符串序）',
+   array_search('10', $order, true) > array_search('9', $order, true));
+ok('数字桌号 2 排在 10 之前',
+   array_search('2', $order, true) < array_search('10', $order, true));
+ok('带字母的桌号 A2 排在 A10 之前',
+   array_search('A2', $order, true) < array_search('A10', $order, true));
+ok('纯数字桌号排在文字桌号之前',
+   array_search('51', $order, true) < array_search('Llevar', $order, true));
+
+// 关闭「问题优先」后应当整体按桌号排
+$byTable = array_column(
+    Report::sortOpenTables(Report::buildOpenTables($sortHeads, $sortCnts, 4)['rows'], false),
+    'table');
+eq('不分组时全部按桌号排', $byTable, ['2', '7', '9', '10', '51', 'A2', 'A10', 'Llevar']);
+
+// 已确认的台也要按桌号排（在问题台之后、正常台之前）
+$ackedAll = [4 => ['fp' => '4:0', 'at' => time()], 5 => ['fp' => '4:0', 'at' => time()]];
+$ackOrder = array_column(Report::sortOpenTables(
+    Report::buildOpenTables($sortHeads, $sortCnts, 4, $ackedAll)['rows']), 'table');
+eq('已确认的台按桌号排在最前那一档之后', array_slice($ackOrder, 0, 2), ['7', '51']);
 
 Ack::resetMemory();
 
