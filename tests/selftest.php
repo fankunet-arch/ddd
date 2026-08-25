@@ -13,6 +13,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../lib/auth.php';
+require_once __DIR__ . '/../lib/ack.php';
 require_once __DIR__ . '/../lib/biz.php';
 require_once __DIR__ . '/../lib/report.php';
 
@@ -359,6 +360,116 @@ foreach ([Report::OPEN_OK, Report::OPEN_SHORT, Report::OPEN_OVER,
           Report::OPEN_NONE, Report::OPEN_NOGUEST] as $st) {
     ok("状态 {$st} 有中文标签", Report::openStateLabel($st) !== $st);
 }
+
+// =====================================================================
+echo "\n【2f2】开台核对的人工确认\n";
+// =====================================================================
+
+Ack::resetMemory();
+
+// 指纹只认「人数 + 套餐份数」，其他字段变了不影响
+$base = ['guests' => 4, 'combo' => 2.0, 'amount' => 47.8, 'dishes' => 8];
+eq('指纹格式', Ack::fingerprint($base), '4:200');
+eq('金额变化不影响指纹', Ack::fingerprint($base + []), Ack::fingerprint(array_merge($base, ['amount' => 99.9])));
+eq('菜品数变化不影响指纹', Ack::fingerprint($base), Ack::fingerprint(array_merge($base, ['dishes' => 30])));
+ok('人数变化会改变指纹', Ack::fingerprint($base) !== Ack::fingerprint(array_merge($base, ['guests' => 5])));
+ok('套餐份数变化会改变指纹', Ack::fingerprint($base) !== Ack::fingerprint(array_merge($base, ['combo' => 3.0])));
+eq('小数份数指纹稳定', Ack::fingerprint(['guests' => 2, 'combo' => 1.5]), '2:150');
+
+// 存取
+Ack::set(101, '4:200');
+eq('存入后能取到', Ack::all()[101]['fp'] ?? null, '4:200');
+Ack::clear(101);
+eq('撤销后取不到', Ack::all()[101] ?? null, null);
+Ack::set(101, '4:200');
+Ack::set(102, '2:0');
+eq('可存多台', count(Ack::all()), 2);
+Ack::clearAll();
+eq('清空全部', count(Ack::all()), 0);
+Ack::set(0, 'x');
+eq('非法订单号不存', count(Ack::all()), 0);
+
+// ---- 与核对结果结合 ----
+$h4 = [['order_head_id' => 7, 't0' => date('Y-m-d H:i:s', time() - 600), 'guests' => 8,
+        'table_name' => '并桌A', 'employee' => 'Jefe', 'amount' => 20.0, 'checks' => 1,
+        'eat_type' => 0, 'status' => 0, 'settled' => 0]];
+$c4 = [['order_head_id' => 7, 'combo_qty' => 0, 'dish_qty' => 3, 'lines_cnt' => 3]];
+
+$noAck = Report::buildOpenTables($h4, $c4, 4);
+eq('未确认时是「未打套餐」', $noAck['rows'][0]['state'], Report::OPEN_NONE);
+eq('未确认时计入待处理', $noAck['sum']['problem'], 1);
+eq('未确认时 acked 为假', $noAck['rows'][0]['acked'], false);
+$fp = $noAck['rows'][0]['fp'];
+eq('行里带出的指纹与 Ack 算的一致', $fp, Ack::fingerprint(['guests' => 8, 'combo' => 0]));
+
+$acks = [7 => ['fp' => $fp, 'at' => time()]];
+$withAck = Report::buildOpenTables($h4, $c4, 4, $acks);
+ok('确认后标记为已确认', $withAck['rows'][0]['acked']);
+eq('确认后不再计入待处理', $withAck['sum']['problem'], 0);
+eq('确认后单独计数', $withAck['sum']['acked'], 1);
+eq('确认后原始状态仍保留', $withAck['rows'][0]['state'], Report::OPEN_NONE);
+ok('确认时间被带出', $withAck['rows'][0]['acked_at'] > 0);
+
+// 人数变了 → 确认自动作废
+$h5 = $h4; $h5[0]['guests'] = 10;
+$changed = Report::buildOpenTables($h5, $c4, 4, $acks);
+ok('人数变化后确认作废', !$changed['rows'][0]['acked']);
+eq('作废后重新计入待处理', $changed['sum']['problem'], 1);
+
+// 补打了套餐 → 确认也作废（而且状态本身也变了）
+$c5 = [['order_head_id' => 7, 'combo_qty' => 8, 'dish_qty' => 11, 'lines_cnt' => 11]];
+$fixed = Report::buildOpenTables($h4, $c5, 4, $acks);
+ok('补打套餐后确认作废', !$fixed['rows'][0]['acked']);
+eq('补打套餐后状态变为一致', $fixed['rows'][0]['state'], Report::OPEN_OK);
+
+// 指纹对不上的陈旧确认不生效
+$stale = Report::buildOpenTables($h4, $c4, 4, [7 => ['fp' => '999:999', 'at' => time()]]);
+ok('指纹不匹配的确认不生效', !$stale['rows'][0]['acked']);
+
+// 只是金额/菜品变了，确认应当保持
+$c6 = [['order_head_id' => 7, 'combo_qty' => 0, 'dish_qty' => 30, 'lines_cnt' => 25]];
+$h6 = $h4; $h6[0]['amount'] = 300.0;
+$keep = Report::buildOpenTables($h6, $c6, 4, $acks);
+ok('只是又点了菜，确认仍然有效', $keep['rows'][0]['acked']);
+
+// 排序：待处理 > 已确认 > 正常
+$hs = [
+    ['order_head_id' => 1, 't0' => '2026-08-25 19:00:00', 'guests' => 2, 'table_name' => 'A',
+     'employee' => '', 'amount' => 0, 'checks' => 1, 'eat_type' => 0, 'status' => 0, 'settled' => 0],
+    ['order_head_id' => 2, 't0' => '2026-08-25 19:01:00', 'guests' => 4, 'table_name' => 'B',
+     'employee' => '', 'amount' => 0, 'checks' => 1, 'eat_type' => 0, 'status' => 0, 'settled' => 0],
+    ['order_head_id' => 3, 't0' => '2026-08-25 19:02:00', 'guests' => 3, 'table_name' => 'C',
+     'employee' => '', 'amount' => 0, 'checks' => 1, 'eat_type' => 0, 'status' => 0, 'settled' => 0],
+];
+$cs = [
+    ['order_head_id' => 1, 'combo_qty' => 2, 'dish_qty' => 2, 'lines_cnt' => 2],  // 一致
+    ['order_head_id' => 2, 'combo_qty' => 0, 'dish_qty' => 1, 'lines_cnt' => 1],  // 未打套餐
+    ['order_head_id' => 3, 'combo_qty' => 0, 'dish_qty' => 1, 'lines_cnt' => 1],  // 未打，但已确认
+];
+$mixed = Report::buildOpenTables($hs, $cs, 4, [3 => ['fp' => '3:0', 'at' => time()]]);
+$sorted2 = Report::sortOpenTables($mixed['rows']);
+eq('排序：待处理的问题台在最前', $sorted2[0]['table'], 'B');
+eq('排序：已确认的排中间', $sorted2[1]['table'], 'C');
+eq('排序：一致的排最后', $sorted2[2]['table'], 'A');
+eq('混合场景待处理计数', $mixed['sum']['problem'], 1);
+eq('混合场景已确认计数', $mixed['sum']['acked'], 1);
+
+Ack::resetMemory();
+
+// ---- 页面：必须走 POST + CSRF + 二次确认 ----
+$openSrc = (string) file_get_contents(__DIR__ . '/../open.php');
+ok('确认走 POST 而不是链接', strpos($openSrc, '<form method="post" class="ackform">') !== false);
+ok('确认表单带 CSRF', strpos($openSrc, "name=\"csrf\" value=\"' . h(Auth::csrfToken())") !== false);
+ok('服务端校验 CSRF', strpos($openSrc, 'Auth::csrfValid($_POST[') !== false);
+ok('有二次确认（ask 参数）', strpos($openSrc, '$askId === $r[\'id\']') !== false);
+ok('二次确认后才真正提交', strpos($openSrc, 'class="btn-mini yes"') !== false
+   && strpos($openSrc, 'class="btn-mini no"') !== false);
+ok('提交后跳转，避免刷新重复提交', strpos($openSrc, "header('Location: ' . \$selfUrl())") !== false);
+ok('确认前比对指纹，数据变了就拒绝',
+   strpos($openSrc, "\$_POST['fp']") !== false && strpos($openSrc, '请重新核对后再确认') !== false);
+ok('已确认的台不算「有问题」', strpos($openSrc, "&& !\$r['acked']") !== false);
+ok('确认状态不写数据库',
+   strpos((string) file_get_contents(__DIR__ . '/../lib/ack.php'), 'Db::select') === false);
 
 // =====================================================================
 echo "\n【2e】登录\n";

@@ -205,8 +205,11 @@ final class Report
      * @param array $heads   Biz::openTables() 的结果
      * @param array $counts  Biz::orderComboCounts() 的结果
      * @param int   $warnHours 开台超过几小时算滞留
+     * @param array $acks    人工确认记录 [order_head_id => ['fp'=>..,'at'=>..]]，
+     *                       指纹对不上（人数或套餐份数变了）就当作没确认过
      */
-    public static function buildOpenTables(array $heads, array $counts, int $warnHours = 4): array
+    public static function buildOpenTables(array $heads, array $counts, int $warnHours = 4,
+                                           array $acks = []): array
     {
         $byId = [];
         foreach ($counts as $c) {
@@ -215,7 +218,7 @@ final class Report
 
         $rows = [];
         $sum  = ['tables' => 0, 'guests' => 0, 'combo' => 0.0, 'amount' => 0.0,
-                 'problem' => 0, 'stale' => 0];
+                 'problem' => 0, 'acked' => 0, 'stale' => 0];
         $now  = time();
 
         foreach ($heads as $h) {
@@ -243,7 +246,15 @@ final class Report
             $mins = $t0 ? (int) floor(($now - $t0) / 60) : null;
             $stale = $mins !== null && $mins >= $warnHours * 60;
 
+            // 人工确认：只有指纹一致才算数，人数或套餐一变就自动作废
+            $fp    = ((int) $guests) . ':' . ((int) round($combo * 100));
+            $a     = $acks[$id] ?? null;
+            $acked = is_array($a) && ($a['fp'] ?? null) === $fp;
+
             $rows[] = [
+                'acked'    => $acked,
+                'acked_at' => $acked ? (int) ($a['at'] ?? 0) : null,
+                'fp'       => $fp,
                 'id'       => $id,
                 'table'    => (string) ($h['table_name'] ?? ''),
                 'guests'   => $guests,
@@ -266,8 +277,13 @@ final class Report
             $sum['guests'] += $guests;
             $sum['combo']  += $combo;
             $sum['amount'] += (float) $h['amount'];
+            // 已人工确认的不再算作待处理，但单独计数，方便看确认了多少台
             if ($state !== self::OPEN_OK) {
-                $sum['problem']++;
+                if ($acked) {
+                    $sum['acked']++;
+                } else {
+                    $sum['problem']++;
+                }
             }
             if ($stale) {
                 $sum['stale']++;
@@ -289,9 +305,11 @@ final class Report
         ];
         usort($rows, static function ($a, $b) use ($rank, $problemFirst) {
             if ($problemFirst) {
-                $cmp = ($rank[$a['state']] ?? 9) <=> ($rank[$b['state']] ?? 9);
-                if ($cmp !== 0) {
-                    return $cmp;
+                // 已确认的降到问题台之后（但仍排在完全正常的台之前）
+                $ra = !empty($a['acked']) ? 3.5 : ($rank[$a['state']] ?? 9);
+                $rb = !empty($b['acked']) ? 3.5 : ($rank[$b['state']] ?? 9);
+                if ($ra != $rb) {
+                    return $ra <=> $rb;
                 }
             }
             return strcmp($a['start'], $b['start']);

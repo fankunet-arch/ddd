@@ -16,6 +16,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/lib/auth.php';
 Auth::requireLogin();
 
+require_once __DIR__ . '/lib/ack.php';
 require_once __DIR__ . '/lib/biz.php';
 require_once __DIR__ . '/lib/report.php';
 require_once __DIR__ . '/lib/view.php';
@@ -25,11 +26,19 @@ $comboIds   = array_map('intval', (array) ($cfg['combo_item_ids'] ?? []));
 $warnHours  = (int) ($cfg['open_table_warn_hours'] ?? 4);
 $onlyOpen   = !isset($_GET['scope']) || q('scope') !== 'all';
 $onlyIssues = qbool('issues');
+// 二次确认：ask=订单号 时，该行原地展开「确定吗？」，避免误点就生效
+$askId      = (int) q('ask', '0');
 
 $error = null;
 $data  = null;
 $meta  = [];
 $menuItems = [];
+
+/** 回到当前视图（保留筛选条件），用于「提交后跳转」避免刷新重复提交 */
+$selfUrl = static function (array $extra = []): string {
+    $qs = array_merge(array_diff_key($_GET, ['ask' => 1]), $extra);
+    return 'open.php' . ($qs ? '?' . http_build_query($qs) : '');
+};
 
 try {
     $menuItems = Biz::menuItems();
@@ -46,9 +55,60 @@ try {
         $meta['queries'][] = ['order_detail', count($counts), microtime(true) - $t1];
     }
 
-    $data = Report::buildOpenTables($heads, $counts, $warnHours);
+    // ---- 处理人工确认 / 撤销（POST + CSRF，提交后跳转回来）----
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $fresh = Report::buildOpenTables($heads, $counts, $warnHours);
+        $byId  = [];
+        foreach ($fresh['rows'] as $r) {
+            $byId[$r['id']] = $r;
+        }
+
+        $act = (string) ($_POST['act'] ?? '');
+        $id  = (int) ($_POST['id'] ?? 0);
+        $msg = null;
+
+        if (!Auth::csrfValid($_POST['csrf'] ?? null)) {
+            $msg = ['err', '表单已过期，请重新操作'];
+        } elseif ($act === 'clear_all') {
+            Ack::clearAll();
+            $msg = ['ok', '已清空全部人工确认'];
+        } elseif ($act === 'unack' && $id > 0) {
+            Ack::clear($id);
+            $msg = ['ok', '已撤销确认'];
+        } elseif ($act === 'ack' && $id > 0) {
+            $row = $byId[$id] ?? null;
+            if ($row === null) {
+                $msg = ['err', '这张单已经不在当前列表里了'];
+            } elseif ((string) ($_POST['fp'] ?? '') !== $row['fp']) {
+                // 从页面渲染到点确认之间，人数或套餐变了 —— 不能拿旧状态盖章
+                $msg = ['err', '这张单的人数或套餐份数刚刚变了，请重新核对后再确认'];
+            } else {
+                Ack::set($id, $row['fp']);
+                $msg = ['ok', '已确认「' . ($row['table'] !== '' ? $row['table'] : '#' . $id) . '」'];
+            }
+        }
+
+        if ($msg !== null) {
+            Auth::boot();
+            $_SESSION['flash'] = $msg;
+        }
+        header('Location: ' . $selfUrl());
+        exit;
+    }
+
+    $data = Report::buildOpenTables($heads, $counts, $warnHours, Ack::all());
 } catch (Throwable $e) {
     $error = '查询失败：' . $e->getMessage();
+}
+
+// 取出并清掉一次性提示
+$flash = null;
+if (PHP_SAPI !== 'cli') {
+    Auth::boot();
+    if (!empty($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        unset($_SESSION['flash']);
+    }
 }
 
 pageHeader('开台核对', 'open');
@@ -69,6 +129,19 @@ pageHeader('开台核对', 'open');
   </div>
 </form>
 
+<?php if ($data !== null && $data['sum']['acked'] > 0): ?>
+  <form method="post" action="<?= h($selfUrl()) ?>" class="clearack">
+    <input type="hidden" name="csrf" value="<?= h(Auth::csrfToken()) ?>">
+    <input type="hidden" name="act" value="clear_all">
+    <span>已人工确认 <b><?= num($data['sum']['acked']) ?></b> 台</span>
+    <button class="btn-mini" type="submit">全部撤销</button>
+  </form>
+<?php endif; ?>
+
+<?php if ($flash): ?>
+  <p class="<?= $flash[0] === 'ok' ? 'okmsg' : 'err' ?>"><?= h($flash[1]) ?></p>
+<?php endif; ?>
+
 <?php if ($error): ?>
   <p class="err"><?= h($error) ?></p>
 <?php endif; ?>
@@ -82,7 +155,9 @@ pageHeader('开台核对', 'open');
   $S    = $data['sum'];
   $rows = Report::sortOpenTables($data['rows']);
   if ($onlyIssues) {
-      $rows = array_values(array_filter($rows, fn($r) => $r['state'] !== Report::OPEN_OK));
+      // 已人工确认的不算「有问题」
+      $rows = array_values(array_filter($rows,
+          fn($r) => $r['state'] !== Report::OPEN_OK && !$r['acked']));
   }
 ?>
 
@@ -97,9 +172,14 @@ pageHeader('开台核对', 'open');
             . qty($S['combo'] - $S['guests']) ?></dd></dl></div>
     <div class="card <?= $S['problem'] > 0 ? 'bad' : 'good' ?>"><h3>需要核对的台</h3>
       <div class="big"><?= num($S['problem']) ?></div>
-      <?php if ($S['stale'] > 0): ?>
-        <dl><dt>开台超 <?= (int) $warnHours ?> 小时</dt><dd><?= num($S['stale']) ?></dd></dl>
-      <?php endif; ?>
+      <dl>
+        <?php if ($S['acked'] > 0): ?>
+          <dt>已人工确认</dt><dd><?= num($S['acked']) ?></dd>
+        <?php endif; ?>
+        <?php if ($S['stale'] > 0): ?>
+          <dt>开台超 <?= (int) $warnHours ?> 小时</dt><dd><?= num($S['stale']) ?></dd>
+        <?php endif; ?>
+      </dl>
     </div>
   </section>
 
@@ -125,15 +205,47 @@ pageHeader('开台核对', 'open');
   };
   ?>
 
+  <?php
+  // 确认按钮：两步走 —— 先点「确认」把该行展开成「确定吗？」，再点「确定」才生效，
+  // 避免手机上误触。整个流程走服务端，不依赖 JS。
+  $ackBtn = static function (array $r) use ($askId, $selfUrl): string {
+      $csrf = '<input type="hidden" name="csrf" value="' . h(Auth::csrfToken()) . '">'
+            . '<input type="hidden" name="id" value="' . (int) $r['id'] . '">';
+
+      if ($r['acked']) {
+          return '<form method="post" class="ackform">' . $csrf
+               . '<input type="hidden" name="act" value="unack">'
+               . '<button class="btn-mini" type="submit">撤销</button></form>';
+      }
+      if ($r['state'] === Report::OPEN_OK) {
+          return '';                       // 本来就一致，没什么可确认的
+      }
+      if ($askId === $r['id']) {
+          return '<form method="post" class="ackform asking">' . $csrf
+               . '<input type="hidden" name="act" value="ack">'
+               . '<input type="hidden" name="fp" value="' . h($r['fp']) . '">'
+               . '<span class="asktip">确定？</span>'
+               . '<button class="btn-mini yes" type="submit">确定</button>'
+               . '<a class="btn-mini no" href="' . h($selfUrl()) . '">取消</a></form>';
+      }
+      return '<a class="btn-mini" href="' . h($selfUrl(['ask' => $r['id']])) . '#t' . (int) $r['id'] . '">确认</a>';
+  };
+  ?>
+
   <?php // ---------- 手机：一台一行的紧凑列表 ---------- ?>
   <ul class="openlist">
     <?php foreach ($rows as $r): $f = $fmt($r); ?>
-      <li class="<?= $f['cls'] ?>">
+      <li id="t<?= (int) $r['id'] ?>" class="<?= $f['cls'] ?><?= $r['acked'] ? ' acked' : '' ?>">
         <div class="l1">
           <b><?= h($f['table']) ?></b>
           <?php if ($r['checks'] > 1): ?><span class="tag">分 <?= (int) $r['checks'] ?> 单</span><?php endif; ?>
           <?php if ($r['eat_type'] === 3): ?><span class="tag">外带</span><?php endif; ?>
-          <span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span>
+          <?php if ($r['acked']): ?>
+            <span class="state s-ack">已确认</span>
+            <span class="tag"><?= h(Report::openStateLabel($r['state'])) ?></span>
+          <?php else: ?>
+            <span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span>
+          <?php endif; ?>
         </div>
         <div class="l2">
           <?php // 没填人数时不显示「— 人」，徽章已经说明了，写出来反而费解 ?>
@@ -147,9 +259,12 @@ pageHeader('开台核对', 'open');
           <span class="t <?= $r['stale'] ? 'stale' : '' ?>"><?= h($f['dur']) ?></span>
         </div>
         <div class="l3">
-          <?= money($r['amount']) ?> · <?= qty($r['dishes']) ?> 菜 / <?= num($r['lines']) ?> 笔
-          <?php if ($r['employee'] !== ''): ?> · <?= h($r['employee']) ?><?php endif; ?>
-          <?php if (!$onlyOpen): ?> · <?= $r['settled'] ? '已结算' : '未结算' ?><?php endif; ?>
+          <span><?= money($r['amount']) ?> · <?= qty($r['dishes']) ?> 菜 / <?= num($r['lines']) ?> 笔
+            <?php if ($r['employee'] !== ''): ?> · <?= h($r['employee']) ?><?php endif; ?>
+            <?php if (!$onlyOpen): ?> · <?= $r['settled'] ? '已结算' : '未结算' ?><?php endif; ?>
+            <?php if ($r['acked']): ?> · 确认于 <?= h(date('H:i', $r['acked_at'])) ?><?php endif; ?>
+          </span>
+          <?= $ackBtn($r) ?>
         </div>
       </li>
     <?php endforeach; ?>
@@ -163,23 +278,32 @@ pageHeader('开台核对', 'open');
       <th>核对结果</th><th class="n">已点菜品</th><th class="n">当前金额</th>
       <th>开台时间</th><th class="n">已开台</th><th>服务员</th>
       <?php if (!$onlyOpen): ?><th>是否已结算</th><?php endif; ?>
+      <th>人工确认</th>
     </tr></thead>
     <tbody>
     <?php foreach ($rows as $r): $f = $fmt($r); ?>
-      <tr class="<?= $f['cls'] ?>">
+      <tr id="d<?= (int) $r['id'] ?>" class="<?= $f['cls'] ?><?= $r['acked'] ? ' acked' : '' ?>">
         <td><strong><?= h($f['table']) ?></strong>
             <?php if ($r['checks'] > 1): ?><span class="tag">分 <?= (int) $r['checks'] ?> 单</span><?php endif; ?>
             <?php if ($r['eat_type'] === 3): ?><span class="tag">外带</span><?php endif; ?></td>
         <td class="n strong"><?= $r['guests'] > 0 ? num($r['guests']) : '—' ?></td>
         <td class="n strong"><?= qty($r['combo']) ?></td>
         <td class="n"><?= h($f['diff']) ?></td>
-        <td><span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span></td>
+        <td><?php if ($r['acked']): ?>
+              <span class="state s-ack">已确认</span>
+              <span class="tag"><?= h(Report::openStateLabel($r['state'])) ?></span>
+            <?php else: ?>
+              <span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span>
+            <?php endif; ?></td>
         <td class="n"><?= qty($r['dishes']) ?> <span class="dim">/ <?= num($r['lines']) ?> 笔</span></td>
         <td class="n"><?= money($r['amount']) ?></td>
         <td class="date"><?= h($r['start'] !== '' ? substr($r['start'], 5, 11) : '—') ?></td>
         <td class="n <?= $r['stale'] ? 'stale' : '' ?>"><?= h($f['dur']) ?></td>
         <td class="dim"><?= h($r['employee']) ?></td>
         <?php if (!$onlyOpen): ?><td class="dim"><?= $r['settled'] ? '已结算' : '未结算' ?></td><?php endif; ?>
+        <td class="ackcell"><?= $ackBtn($r) ?>
+          <?php if ($r['acked']): ?><span class="dim"><?= h(date('H:i', $r['acked_at'])) ?></span><?php endif; ?>
+        </td>
       </tr>
     <?php endforeach; ?>
     </tbody>
@@ -195,6 +319,16 @@ pageHeader('开台核对', 'open');
     <br>
     只点单品不吃自助的客人，本来就不会有套餐 —— 这类会显示成「未打套餐」，属正常，
     请结合金额与菜品数判断。「已开台」按 时:分 显示，超过 <?= (int) $warnHours ?> 小时会标红。
+  </p>
+  <p class="note">
+    <span class="state s-ack">已确认</span>
+    并桌之类的情况本来就会人数多、套餐对不上，核对过一次可以点「确认」标记掉，
+    之后不再计入「需要核对的台」。点确认后会再问一次「确定？」，防止误触。
+    <br>
+    确认只记在<strong>当前登录会话</strong>里（不写数据库，本程序始终只读），
+    <?= (int) Ack::hours() ?> 小时后自动失效，退出登录即清空，换一台设备也要重新确认。
+    <strong>该台的人数或套餐份数一旦变化，确认自动作废</strong>，会重新回到待核对状态 ——
+    所以补打了套餐、加了人，都不会被旧的确认盖住。
   </p>
 
   <?php endif; ?>
