@@ -52,11 +52,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1e2836">
 <title>登录 · 营业数据查询</title>
 <link rel="stylesheet" href="assets/app.css">
 </head>
 <body class="loginpage">
 <form class="loginbox" method="post" action="login.php">
+  <div class="logo" aria-hidden="true">📊</div>
   <h1>营业数据查询</h1>
   <p class="sub">请输入密码</p>
 

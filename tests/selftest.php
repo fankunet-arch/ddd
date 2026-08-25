@@ -408,6 +408,65 @@ ok('checkdb.php 登录跳转在任何输出之前',
    strpos($src, "Location: ../login.php") < strpos($src, "echo '<pre"));
 
 // =====================================================================
+echo "\n【2g】自适应布局\n";
+// 浏览器层面的验证（横向溢出、点击目标、字号）需要真实渲染，
+// 这里只静态校验关键规则和标记有没有掉，防止改样式时误删。
+// =====================================================================
+
+$css = (string) file_get_contents(__DIR__ . '/../assets/app.css');
+
+foreach (['max-width:900px' => '平板断点',
+          'max-width:640px' => '手机断点',
+          'pointer:coarse'  => '触屏设备适配'] as $q => $desc) {
+    ok("样式含{$desc}（{$q}）", strpos(str_replace(' ', '', $css), $q) !== false);
+}
+ok('手机上表单竖排', strpos($css, 'flex-direction:column') !== false);
+ok('输入框字号 ≥16px（否则 iOS 聚焦时会放大页面）',
+   preg_match('/input\[type=date\][^{]*\{[^}]*font-size:16px/s', $css) === 1);
+ok('表格容器可横向滚动', strpos($css, 'overflow-x:auto') !== false);
+ok('有吸附首列规则', strpos($css, 'table.grid.stick') !== false);
+ok('有手机紧凑列表规则', strpos($css, '.openlist') !== false);
+ok('紧凑列表默认隐藏（只在手机显示）', strpos($css, '.openlist{display:none') !== false);
+ok('手机上隐藏次要列', strpos($css, '.hide-sm{display:none}') !== false);
+ok('登录页适配小屏高度', strpos($css, '100dvh') !== false);
+
+// 两套页面模板都要有 viewport，否则手机上会按桌面宽度缩放
+foreach (['../login.php' => '登录页', '../lib/view.php' => '主页面'] as $f => $desc) {
+    $src = (string) file_get_contents(__DIR__ . '/' . $f);
+    ok("{$desc}有 viewport 声明",
+       strpos($src, 'name="viewport"') !== false
+       && strpos($src, 'width=device-width') !== false);
+    ok("{$desc}有 theme-color", strpos($src, 'name="theme-color"') !== false);
+}
+
+// 导航在手机上换短名，靠 CSS 切换，不依赖 JS
+$view = (string) file_get_contents(__DIR__ . '/../lib/view.php');
+ok('导航项带长短两种标题', strpos($view, 'class="lg"') !== false && strpos($view, 'class="sm"') !== false);
+ok('导航长短标题由 CSS 切换',
+   strpos($css, '.tabs .sm{display:none}') !== false && strpos($css, '.tabs .sm{display:inline}') !== false);
+
+// 开台核对是手机上最常用的页：手机走紧凑列表，桌面走完整表格，两者二选一
+$open = (string) file_get_contents(__DIR__ . '/../open.php');
+ok('开台核对有手机紧凑列表', strpos($open, '<ul class="openlist">') !== false);
+ok('开台核对有桌面完整表格', strpos($open, 'class="tablewrap opentable"') !== false);
+ok('手机上显示列表并隐藏表格',
+   strpos($css, '.openlist{display:block}') !== false && strpos($css, '.opentable{display:none}') !== false);
+// 两个视图共用同一个格式化函数，避免口径跑偏
+ok('两个视图共用格式化函数', substr_count($open, '$fmt($r)') === 2 && strpos($open, '$fmt = static function') !== false);
+foreach (['l1', 'l2', 'l3'] as $line) {
+    ok("紧凑列表有 {$line} 行", strpos($open, 'class="' . $line . '"') !== false);
+}
+
+// 各页表格都要能在窄屏下横向滚动并保留首列
+foreach (['../index.php', '../dish.php', '../station.php', '../open.php'] as $f) {
+    $src  = (string) file_get_contents(__DIR__ . '/' . $f);
+    $name = basename($f);
+    $tables = preg_match_all('/<table class="grid[^"]*"/', $src);
+    $inWrap = preg_match_all('/<div class="tablewrap[^"]*">\s*\n?\s*<table/', $src);
+    ok("{$name} 的表格都放在滚动容器里（{$inWrap}/{$tables}）", $tables > 0 && $inWrap === $tables);
+}
+
+// =====================================================================
 echo "\n【3】日期范围换算\n";
 // =====================================================================
 

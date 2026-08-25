@@ -111,8 +111,53 @@ pageHeader('开台核对', 'open');
   <?php else: ?>
 
   <h2><?= $onlyIssues ? '有问题的台' : '开台明细' ?>（<?= num(count($rows)) ?>）</h2>
-  <div class="tablewrap">
-  <table class="grid">
+  <?php
+  // 每行要显示的内容只算一次，桌面表格与手机列表共用，避免两处口径跑偏
+  $fmt = static function (array $r): array {
+      return [
+          'cls'   => ['ok' => '', 'short' => 'row-bad', 'none' => 'row-bad',
+                      'over' => 'row-warn', 'noguest' => 'row-warn'][$r['state']] ?? '',
+          'table' => $r['table'] !== '' ? $r['table'] : '#' . $r['id'],
+          'dur'   => $r['minutes'] === null ? '—'
+                     : intdiv($r['minutes'], 60) . ':' . str_pad((string) ($r['minutes'] % 60), 2, '0', STR_PAD_LEFT),
+          'diff'  => $r['guests'] > 0 ? (($r['diff'] > 0 ? '+' : '') . qty($r['diff'])) : '—',
+      ];
+  };
+  ?>
+
+  <?php // ---------- 手机：一台一行的紧凑列表 ---------- ?>
+  <ul class="openlist">
+    <?php foreach ($rows as $r): $f = $fmt($r); ?>
+      <li class="<?= $f['cls'] ?>">
+        <div class="l1">
+          <b><?= h($f['table']) ?></b>
+          <?php if ($r['checks'] > 1): ?><span class="tag">分 <?= (int) $r['checks'] ?> 单</span><?php endif; ?>
+          <?php if ($r['eat_type'] === 3): ?><span class="tag">外带</span><?php endif; ?>
+          <span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span>
+        </div>
+        <div class="l2">
+          <?php // 没填人数时不显示「— 人」，徽章已经说明了，写出来反而费解 ?>
+          <?php if ($r['guests'] > 0): ?>
+            <span><b><?= num($r['guests']) ?></b> 人</span>
+          <?php endif; ?>
+          <span>套餐 <b><?= qty($r['combo']) ?></b> 份</span>
+          <?php if ($r['guests'] > 0 && abs($r['diff']) > 0.001): ?>
+            <span class="d <?= $r['state'] === Report::OPEN_OVER ? 'over' : '' ?>"><?= h($f['diff']) ?></span>
+          <?php endif; ?>
+          <span class="t <?= $r['stale'] ? 'stale' : '' ?>"><?= h($f['dur']) ?></span>
+        </div>
+        <div class="l3">
+          <?= money($r['amount']) ?> · <?= qty($r['dishes']) ?> 菜 / <?= num($r['lines']) ?> 笔
+          <?php if ($r['employee'] !== ''): ?> · <?= h($r['employee']) ?><?php endif; ?>
+          <?php if (!$onlyOpen): ?> · <?= $r['settled'] ? '已结算' : '未结算' ?><?php endif; ?>
+        </div>
+      </li>
+    <?php endforeach; ?>
+  </ul>
+
+  <?php // ---------- 桌面：完整表格 ---------- ?>
+  <div class="tablewrap opentable">
+  <table class="grid stick">
     <thead><tr>
       <th>桌号</th><th class="n">人数</th><th class="n">套餐份数</th><th class="n">差额</th>
       <th>核对结果</th><th class="n">已点菜品</th><th class="n">当前金额</th>
@@ -120,25 +165,19 @@ pageHeader('开台核对', 'open');
       <?php if (!$onlyOpen): ?><th>是否已结算</th><?php endif; ?>
     </tr></thead>
     <tbody>
-    <?php foreach ($rows as $r):
-        $cls = ['ok' => '', 'short' => 'row-bad', 'none' => 'row-bad',
-                'over' => 'row-warn', 'noguest' => 'row-warn'][$r['state']] ?? ''; ?>
-      <tr class="<?= $cls ?>">
-        <td><strong><?= h($r['table'] !== '' ? $r['table'] : '#' . $r['id']) ?></strong>
+    <?php foreach ($rows as $r): $f = $fmt($r); ?>
+      <tr class="<?= $f['cls'] ?>">
+        <td><strong><?= h($f['table']) ?></strong>
             <?php if ($r['checks'] > 1): ?><span class="tag">分 <?= (int) $r['checks'] ?> 单</span><?php endif; ?>
             <?php if ($r['eat_type'] === 3): ?><span class="tag">外带</span><?php endif; ?></td>
         <td class="n strong"><?= $r['guests'] > 0 ? num($r['guests']) : '—' ?></td>
         <td class="n strong"><?= qty($r['combo']) ?></td>
-        <td class="n"><?= $r['guests'] > 0
-              ? ($r['diff'] > 0 ? '+' : '') . qty($r['diff']) : '—' ?></td>
+        <td class="n"><?= h($f['diff']) ?></td>
         <td><span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span></td>
         <td class="n"><?= qty($r['dishes']) ?> <span class="dim">/ <?= num($r['lines']) ?> 笔</span></td>
         <td class="n"><?= money($r['amount']) ?></td>
         <td class="date"><?= h($r['start'] !== '' ? substr($r['start'], 5, 11) : '—') ?></td>
-        <td class="n <?= $r['stale'] ? 'stale' : '' ?>">
-          <?= $r['minutes'] === null ? '—'
-              : (intdiv($r['minutes'], 60) . ':' . str_pad((string) ($r['minutes'] % 60), 2, '0', STR_PAD_LEFT)) ?>
-        </td>
+        <td class="n <?= $r['stale'] ? 'stale' : '' ?>"><?= h($f['dur']) ?></td>
         <td class="dim"><?= h($r['employee']) ?></td>
         <?php if (!$onlyOpen): ?><td class="dim"><?= $r['settled'] ? '已结算' : '未结算' ?></td><?php endif; ?>
       </tr>
@@ -167,7 +206,7 @@ pageHeader('开台核对', 'open');
       <?php if (!$comboIds): ?>
         <p class="empty">清单为空。</p>
       <?php else: ?>
-      <div class="tablewrap"><table class="grid small">
+      <div class="tablewrap"><table class="grid small stick">
         <thead><tr><th class="n">编号</th><th>菜品</th><th class="n">单价</th><th>状态</th></tr></thead>
         <tbody>
         <?php foreach ($comboIds as $cid):

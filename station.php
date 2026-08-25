@@ -126,13 +126,13 @@ pageHeader('岗位单量排名', 'station');
 
   <h2>岗位排名 —— 按<?= h($label) ?></h2>
   <div class="tablewrap">
-  <table class="grid rank">
+  <table class="grid rank stick">
     <thead><tr>
       <th class="n">#</th><th>岗位（打印机）</th>
-      <th class="n">白天单量</th><th class="n">晚上单量</th>
+      <th class="n hide-sm">白天单量</th><th class="n hide-sm">晚上单量</th>
       <?php if ($showGap): ?><th class="n">时段外</th><?php endif; ?>
       <th class="n">全天单量</th><th class="n">占比</th>
-      <th class="n">出品份数</th><th class="n">出品笔数</th><th class="n">菜品数</th><th class="n">金额</th>
+      <th class="n">出品份数</th><th class="n hide-sm">出品笔数</th><th class="n hide-sm">菜品数</th><th class="n">金额</th>
       <th class="barcol"></th>
     </tr></thead>
     <tbody>
@@ -142,15 +142,15 @@ pageHeader('岗位单量排名', 'station');
       <tr>
         <td class="n dim"><?= $i + 1 ?></td>
         <td class="iname"><span title="<?= h($s['pc_name']) ?>"><strong><?= h($s['pc_name']) ?></strong></span></td>
-        <td class="n"><?= num($s['day']['orders']) ?></td>
-        <td class="n"><?= num($s['night']['orders']) ?></td>
+        <td class="n hide-sm"><?= num($s['day']['orders']) ?></td>
+        <td class="n hide-sm"><?= num($s['night']['orders']) ?></td>
         <?php if ($showGap): ?><td class="n"><?= num($s['gap']['orders']) ?></td><?php endif; ?>
         <td class="n strong"><?= num($T['orders']) ?></td>
         <td class="n dim"><?= $G['total']['orders'] > 0
               ? number_format($T['orders'] / $G['total']['orders'] * 100, 1) . '%' : '—' ?></td>
         <td class="n"><?= qty($T['qty']) ?></td>
-        <td class="n"><?= num($T['lines']) ?></td>
-        <td class="n dim"><?= num($T['items']) ?></td>
+        <td class="n hide-sm"><?= num($T['lines']) ?></td>
+        <td class="n dim hide-sm"><?= num($T['items']) ?></td>
         <td class="n"><?= money($T['amount']) ?></td>
         <td class="barcol"><span class="bar top" style="width:<?= $w ?>%"></span></td>
       </tr>
@@ -158,14 +158,14 @@ pageHeader('岗位单量排名', 'station');
     </tbody>
     <tfoot><tr>
       <th></th><th>合计 <?= num(count($list)) ?> 个岗位</th>
-      <th class="n"><?= num($G['day']['orders']) ?></th>
-      <th class="n"><?= num($G['night']['orders']) ?></th>
+      <th class="n hide-sm"><?= num($G['day']['orders']) ?></th>
+      <th class="n hide-sm"><?= num($G['night']['orders']) ?></th>
       <?php if ($showGap): ?><th class="n"><?= num($G['gap']['orders']) ?></th><?php endif; ?>
       <th class="n"><?= num($G['total']['orders']) ?></th>
       <th class="n">—</th>
       <th class="n"><?= qty($G['total']['qty']) ?></th>
-      <th class="n"><?= num($G['total']['lines']) ?></th>
-      <th class="n">—</th>
+      <th class="n hide-sm"><?= num($G['total']['lines']) ?></th>
+      <th class="n hide-sm">—</th>
       <th class="n"><?= money($G['total']['amount']) ?></th>
       <th></th>
     </tr></tfoot>

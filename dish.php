@@ -197,7 +197,7 @@ pageHeader('菜品点单统计', 'dish');
     <p class="empty">该菜品在所选范围内没有点单记录。</p>
   <?php else: ?>
   <div class="tablewrap">
-  <table class="grid">
+  <table class="grid stick">
     <thead><tr><th>营业日</th><th class="n">白天</th><th class="n">晚上</th>
       <?php if ($T['gap'] > 0): ?><th class="n">时段外</th><?php endif; ?>
       <th class="n">合计</th><th class="n">下单次数</th><th class="n">金额</th></tr></thead>
@@ -266,7 +266,7 @@ pageHeader('菜品点单统计', 'dish');
     <p class="empty">所选范围内没有任何岗位的点单记录。</p>
   <?php else: ?>
     <div class="tablewrap">
-    <table class="grid">
+    <table class="grid stick">
       <thead><tr><th>岗位</th><th class="n">菜品数</th><th class="n">点单量</th><th class="n">占比</th><th class="n">下单次数</th><th class="n">金额</th><th>操作</th></tr></thead>
       <tbody>
       <?php $allQty = array_sum(array_column($summary, 'qty')); ?>
@@ -321,7 +321,7 @@ pageHeader('菜品点单统计', 'dish');
     <h2>零点单菜品（<?= num(count($never)) ?> 个）</h2>
     <?php if (!$never): ?><p class="empty">所有菜品在此范围内都有点单。</p><?php else: ?>
     <div class="tablewrap">
-    <table class="grid small">
+    <table class="grid small stick">
       <thead><tr><th class="n">编号</th><th>菜品</th><th>岗位</th></tr></thead>
       <tbody>
       <?php foreach ($never as $n): ?>
@@ -366,9 +366,9 @@ function renderRank(array $list, string $seg, string $kind): string
     foreach ($list as $it) {
         $max = max($max, (float) $it[$seg]['qty']);
     }
-    $h = '<div class="tablewrap"><table class="grid rank"><thead><tr>'
-       . '<th class="n">#</th><th>菜品</th><th>岗位</th><th class="n">点单量</th>'
-       . '<th class="n">下单次数</th><th class="n">金额</th><th class="barcol"></th>'
+    $h = '<div class="tablewrap"><table class="grid rank stick"><thead><tr>'
+       . '<th class="n">#</th><th>菜品</th><th class="hide-sm">岗位</th><th class="n">点单量</th>'
+       . '<th class="n hide-sm">下单次数</th><th class="n">金额</th><th class="barcol"></th>'
        . '</tr></thead><tbody>';
     foreach ($list as $i => $it) {
         $c = $it[$seg];
@@ -378,9 +378,9 @@ function renderRank(array $list, string $seg, string $kind): string
             // 菜名过长会把表格撑开，用 CSS 截断并加 title，鼠标悬停可看全名
             . '<td class="iname"><a href="' . h(rankLink((int) $it['id'])) . '"'
             . ' title="' . h($it['name']) . '">' . h($it['name']) . '</a></td>'
-            . '<td class="dim">' . h($it['pc_name']) . '</td>'
+            . '<td class="dim hide-sm">' . h($it['pc_name']) . '</td>'
             . '<td class="n strong">' . qty($c['qty']) . '</td>'
-            . '<td class="n">' . num($c['times']) . '</td>'
+            . '<td class="n hide-sm">' . num($c['times']) . '</td>'
             . '<td class="n">' . money($c['amount']) . '</td>'
             . '<td class="barcol"><span class="bar ' . h($kind) . '" style="width:' . $w . '%"></span></td>'
             . '</tr>';

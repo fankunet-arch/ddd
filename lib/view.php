@@ -61,20 +61,33 @@ function pageHeader(string $title, string $active): void
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1e2836">
 <title><?= h($title) ?></title>
 <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
 <header class="topbar">
-  <h1>营业数据查询</h1>
-  <nav>
-    <a href="open.php"    class="<?= $active === 'open'    ? 'on' : '' ?>">开台核对</a>
-    <a href="index.php"   class="<?= $active === 'sales'   ? 'on' : '' ?>">营业额统计</a>
-    <a href="dish.php"    class="<?= $active === 'dish'    ? 'on' : '' ?>">菜品点单统计</a>
-    <a href="station.php" class="<?= $active === 'station' ? 'on' : '' ?>">岗位单量排名</a>
+  <div class="topbar-in">
+    <span class="brand">营业数据查询</span>
+    <span class="ro">只读</span>
+    <a class="logout" href="login.php?action=logout">退出</a>
+  </div>
+  <?php
+  // 每项给长短两种写法：宽屏用全称，手机上换成短名，靠 CSS 切换，不用 JS
+  $nav = [
+      'open'    => ['open.php',    '开台核对',     '开台'],
+      'sales'   => ['index.php',   '营业额统计',   '营业额'],
+      'dish'    => ['dish.php',    '菜品点单统计', '菜品'],
+      'station' => ['station.php', '岗位单量排名', '岗位'],
+  ];
+  ?>
+  <nav class="tabs">
+    <?php foreach ($nav as $key => [$href, $long, $short]): ?>
+      <a href="<?= h($href) ?>" class="<?= $active === $key ? 'on' : '' ?>">
+        <span class="lg"><?= h($long) ?></span><span class="sm"><?= h($short) ?></span>
+      </a>
+    <?php endforeach; ?>
   </nav>
-  <span class="ro">只读模式</span>
-  <a class="logout" href="login.php?action=logout">退出</a>
 </header>
 <main>
     <?php

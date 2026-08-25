@@ -114,7 +114,7 @@ pageHeader('营业额统计', 'sales');
 
   <h2>每日明细</h2>
   <div class="tablewrap">
-  <table class="grid">
+  <table class="grid stick">
     <thead>
       <tr>
         <th rowspan="2">营业日</th>
@@ -161,7 +161,7 @@ pageHeader('营业额统计', 'sales');
 
   <h2>金额构成（全时段合计）</h2>
   <div class="tablewrap">
-  <table class="grid small">
+  <table class="grid small stick">
     <thead><tr>
       <th>时段</th>
       <th class="n">原价合计</th><th class="n">折扣</th><th class="n">服务费</th>
