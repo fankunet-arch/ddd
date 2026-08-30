@@ -386,6 +386,27 @@ ok('点号只当普通字符',        !Report::isNoComboTable('LlevarX', ['Lleva
 ok('单字通配 ? 生效',          Report::isNoComboTable('Llevar1', ['Llevar?']));
 ok('单字通配只吃一个字符',    !Report::isNoComboTable('Llevar12', ['Llevar?']));
 
+// ---- 规则的读取与默认值 ----
+// config.php 是用户自己维护的（里面有数据库密码），升级程序时多半不会跟着换。
+// 所以缺项必须套用代码里的默认值，否则功能会静默失效。
+$oldCfg = ['host' => 'x', 'combo_item_ids' => [1890]];   // 老版本 config，没有这两项
+eq('老 config 套用默认桌号规则',
+   Report::skipRules($oldCfg)['tables'], Report::DEFAULT_NO_COMBO_TABLES);
+ok('默认规则能盖住 Llevar',
+   Report::isNoComboTable('Llevar', Report::skipRules($oldCfg)['tables']));
+eq('老 config 的 eat_type 规则为空', Report::skipRules($oldCfg)['eat_types'], []);
+// 明确写成 [] 是「不要跳过任何台」，不能被默认值覆盖
+eq('显式留空则不套默认', Report::skipRules(['no_combo_tables' => []])['tables'], []);
+eq('显式配置优先',
+   Report::skipRules(['no_combo_tables' => ['Barra*']])['tables'], ['Barra*']);
+eq('规则里的空白项被剔除',
+   Report::skipRules(['no_combo_tables' => ['  Llevar*  ', '', '  ']])['tables'], ['Llevar*']);
+eq('eat_types 转成整数',
+   Report::skipRules(['no_combo_eat_types' => ['3', 5]])['eat_types'], [3, 5]);
+// 仓库里的 config.php 本身也要能直接用
+ok('随包的 config.php 带默认外带规则',
+   Report::isNoComboTable('Llevar', Report::skipRules(require __DIR__ . '/../config.php')['tables']));
+
 // ---- eat_type 规则 ----
 ok('eat_type 命中即免核对', Report::skipsComboCheck('12', 3, ['eat_types' => [3]]));
 ok('eat_type 不命中',       !Report::skipsComboCheck('12', 0, ['eat_types' => [3]]));
@@ -583,8 +604,10 @@ ok('确认状态不写数据库',
    strpos((string) file_get_contents(__DIR__ . '/../lib/ack.php'), 'Db::select') === false);
 
 // ---- 页面：免核对规则来自 config，且不参与「只看有问题的台」----
-ok('免核对规则从 config 读取', strpos($openSrc, "no_combo_tables") !== false
-   && strpos($openSrc, 'no_combo_eat_types') !== false);
+ok('免核对规则从 config 读取（缺项套默认）',
+   strpos($openSrc, 'Report::skipRules($cfg)') !== false);
+ok('页面会提示当前用的是默认值还是 config 里的配置',
+   strpos($openSrc, '$skipCustom') !== false);
 ok('免核对规则传给了核对函数',
    strpos($openSrc, 'Report::buildOpenTables($heads, $counts, $warnHours, Ack::all(), $skipRules)') !== false);
 ok('「只看有问题」会滤掉免核对的台',

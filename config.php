@@ -91,6 +91,10 @@ return [
     //   'Llevar*'  → Llevar、LLEVAR 2、Llevar-03 都算
     //   '外带*'    → 外带、外带1
     // 想再排除吧台、打包台，往下加一行即可，例如 'Barra*'、'Recoger*'。
+    //
+    // 整项删掉（或用的是升级前的旧 config.php）时，程序自动套用同样的默认值
+    // ['Llevar*', '外带*']，不会因为漏配就失效。真要「所有台都核对」，
+    // 请明确写成空数组 []。
     'no_combo_tables' => ['Llevar*', '外带*'],
 
     // 也可以按 order_head.eat_type 排除（比桌号更准，但要先确认本店的取值）。

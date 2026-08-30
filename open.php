@@ -24,12 +24,10 @@ require_once __DIR__ . '/lib/view.php';
 $cfg        = Db::config();
 $comboIds   = array_map('intval', (array) ($cfg['combo_item_ids'] ?? []));
 $warnHours  = (int) ($cfg['open_table_warn_hours'] ?? 4);
-// 外带（Llevar）之类的台不按人头核对，规则写在 config.php 里
-$skipRules  = [
-    'tables'    => array_values(array_filter(array_map(
-        static fn($v) => trim((string) $v), (array) ($cfg['no_combo_tables'] ?? [])))),
-    'eat_types' => array_map('intval', (array) ($cfg['no_combo_eat_types'] ?? [])),
-];
+// 外带（Llevar）之类的台不按人头核对。规则可在 config.php 里改，
+// 老版本 config 没有这两项时自动套用默认值（见 Report::DEFAULT_NO_COMBO_TABLES）
+$skipRules  = Report::skipRules($cfg);
+$skipCustom = array_key_exists('no_combo_tables', $cfg);
 $onlyOpen   = !isset($_GET['scope']) || q('scope') !== 'all';
 $onlyIssues = qbool('issues');
 // 二次确认：ask=订单号 时，该行原地展开「确定吗？」，避免误点就生效
@@ -348,7 +346,11 @@ pageHeader('开台核对', 'open');
       桌号匹配 <?php foreach ($skipRules['tables'] as $i => $p): ?><?= $i ? '、' : '' ?><code><?= h($p) ?></code><?php endforeach; ?>
       （大小写不敏感，<code>*</code> 是通配符，在 <code>no_combo_tables</code> 里改）
     <?php else: ?>
-      桌号规则为空（<code>no_combo_tables</code>）
+      桌号规则为空（<code>no_combo_tables</code>），所有台都要核对
+    <?php endif; ?>
+    <?php if (!$skipCustom): ?>
+      —— 这是<strong>内置默认值</strong>，你的 config.php 里还没写 <code>no_combo_tables</code>；
+      想改（比如再加个 <code>Barra*</code>）就把这一项加进去
     <?php endif; ?>
     <?php if ($skipRules['eat_types']): ?>
       ；另外 <code>eat_type</code> 为

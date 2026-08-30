@@ -201,6 +201,37 @@ final class Report
     public const OPEN_SKIP    = 'skip';     // 外带之类，本来就没有人头套餐，不用核对
 
     /**
+     * config.php 里没写 no_combo_tables 时用的默认桌号规则。
+     *
+     * 默认值放在代码里而不是只写在 config.php，是因为 config.php 是用户自己维护的
+     * （里面有数据库密码），升级程序时通常不会跟着换 —— 默认值写在那边的话，
+     * 老的 config 会让这个功能整个失效。
+     */
+    public const DEFAULT_NO_COMBO_TABLES = ['Llevar*', '外带*'];
+
+    /**
+     * 从 config 里读出免核对规则，缺项套用默认值。
+     *
+     * 用 array_key_exists 区分「没写这一项」和「写了但留空」：
+     * 老版本 config.php 没这一项 → 套默认；明确写成 [] → 表示「不要跳过任何台」，必须尊重。
+     *
+     * @return array ['tables' => 桌号通配符[], 'eat_types' => eat_type 取值[]]
+     */
+    public static function skipRules(array $cfg): array
+    {
+        $tables = array_key_exists('no_combo_tables', $cfg)
+            ? (array) $cfg['no_combo_tables']
+            : self::DEFAULT_NO_COMBO_TABLES;
+
+        $tables = array_map(static fn($v) => trim((string) $v), $tables);
+
+        return [
+            'tables'    => array_values(array_filter($tables, static fn($v) => $v !== '')),
+            'eat_types' => array_map('intval', (array) ($cfg['no_combo_eat_types'] ?? [])),
+        ];
+    }
+
+    /**
      * 桌号是否属于「不按人头核对」的台。
      *
      * 大小写不敏感，支持 * 通配符（'Llevar*' 能匹配 Llevar、LLEVAR 2、Llevar-03）。
