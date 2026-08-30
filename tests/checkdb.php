@@ -83,6 +83,15 @@ okmsg(sprintf('营业时段: 白天 %s–%s，晚上 %s–次日 %s，营业日�
     substr($cfg['night_start'], 0, 5), substr($cfg['night_end'], 0, 5),
     $cfg['day_cut_hour']));
 okmsg('日期跨度上限: ' . $cfg['max_range_days'] . ' 天');
+okmsg('免核对的桌号: ' . (implode('、', (array) $cfg['no_combo_tables']) ?: '（无，所有台都核对）'));
+
+// 配置分两层：lib/settings.php 是随程序更新的默认值，config.php 覆盖其中个别项。
+// 列出被覆盖的功能参数，方便排查「升级了但没生效」这类问题。
+$funcKeys = array_diff(array_keys(Db::defaults()), ['driver']);
+$custom   = array_intersect($funcKeys, array_keys(Db::overrides()));
+okmsg($custom
+    ? '功能参数: config.php 覆盖了 ' . implode('、', $custom) . '（其余用 lib/settings.php 的默认值）'
+    : '功能参数: 全部用 lib/settings.php 的默认值，会随程序升级更新');
 
 if ((int) substr($cfg['night_end'], 0, 2) !== (int) $cfg['day_cut_hour']) {
     warnmsg('night_end 与 day_cut_hour 不一致，跨夜账单的营业日归属会出错');

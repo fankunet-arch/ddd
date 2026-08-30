@@ -9,6 +9,9 @@
  *
  * 配合 config.php 中建议的只读数据库账号，形成双重保险。
  *
+ * 配置分两层：lib/settings.php 是随程序更新的功能默认值，
+ * config.php 是站点自己的连接信息与密码，可覆盖其中任意一项。
+ *
  * 底层驱动支持 PDO 与 mysqli 两种，自动选择可用的那个：
  * 很多老服务器只装了 mysqli 而没有 pdo_mysql，或者启用 pdo_mysql 会导致
  * PHP 启动失败。两条路都走得通，就不必为了跑这个程序去动 php.ini。
@@ -19,7 +22,8 @@ declare(strict_types=1);
 final class Db
 {
     private static ?DbDriver $driver = null;
-    private static array $cfg = [];
+    private static array $cfg  = [];
+    private static array $over = [];
 
     /** 禁止出现在 SQL 中的写操作关键字 */
     private const FORBIDDEN = [
@@ -29,12 +33,39 @@ final class Db
         'INTO OUTFILE', 'INTO DUMPFILE',
     ];
 
+    /**
+     * 生效的配置 = lib/settings.php 的默认值，被 config.php 里写了的键覆盖。
+     *
+     * 这样分两层是有原因的：config.php 装着数据库密码，是站点自己维护的，
+     * 升级程序时基本不会重新上传。功能参数如果只写在那边，新版本加的参数
+     * 就永远读不到，功能会静默失效。所以功能默认值放在随程序更新的
+     * lib/settings.php 里，config.php 只在需要时覆盖个别键。
+     */
     public static function config(): array
     {
         if (!self::$cfg) {
-            self::$cfg = require __DIR__ . '/../config.php';
+            $defaults = (array) require __DIR__ . '/settings.php';
+            self::$over = (array) require __DIR__ . '/../config.php';
+            // 「+」保留左边已有的键，即 config.php 写了的优先，没写的用默认值
+            self::$cfg = self::$over + $defaults;
         }
         return self::$cfg;
+    }
+
+    /**
+     * config.php 里【显式写了】的那些键。
+     * 用来区分「用的是程序默认值」还是「站点自己配的」，页面上会据此提示。
+     */
+    public static function overrides(): array
+    {
+        self::config();
+        return self::$over;
+    }
+
+    /** 程序自带的功能默认值（lib/settings.php），不含 config.php 的覆盖 */
+    public static function defaults(): array
+    {
+        return (array) require __DIR__ . '/settings.php';
     }
 
     /** 当前实际使用的驱动名：pdo 或 mysqli */

@@ -8,7 +8,8 @@
  *   order_head    —— 哪些台开着、几个人
  *   order_detail  —— 每台点了几份套餐、几个菜
  *
- * 算作「按人头套餐」的菜品由 config.php 的 combo_item_ids 决定，页面底部会列出来。
+ * 算作「按人头套餐」的菜品由 combo_item_ids 决定（默认在 lib/settings.php，
+ * 可在 config.php 里覆盖），页面底部会列出当前生效的清单。
  */
 
 declare(strict_types=1);
@@ -24,10 +25,10 @@ require_once __DIR__ . '/lib/view.php';
 $cfg        = Db::config();
 $comboIds   = array_map('intval', (array) ($cfg['combo_item_ids'] ?? []));
 $warnHours  = (int) ($cfg['open_table_warn_hours'] ?? 4);
-// 外带（Llevar）之类的台不按人头核对。规则可在 config.php 里改，
-// 老版本 config 没有这两项时自动套用默认值（见 Report::DEFAULT_NO_COMBO_TABLES）
+// 外带（Llevar）之类的台不按人头核对。默认规则在 lib/settings.php，
+// 站点想改就在 config.php 里写同名的键覆盖
 $skipRules  = Report::skipRules($cfg);
-$skipCustom = array_key_exists('no_combo_tables', $cfg);
+$skipCustom = array_key_exists('no_combo_tables', Db::overrides());
 $onlyOpen   = !isset($_GET['scope']) || q('scope') !== 'all';
 $onlyIssues = qbool('issues');
 // 二次确认：ask=订单号 时，该行原地展开「确定吗？」，避免误点就生效
@@ -153,7 +154,7 @@ pageHeader('开台核对', 'open');
 <?php endif; ?>
 
 <?php if (!$comboIds): ?>
-  <p class="err">config.php 里的 <code>combo_item_ids</code> 是空的，套餐份数会全部显示为 0。
+  <p class="err"><code>combo_item_ids</code> 是空的，套餐份数会全部显示为 0。
     请先把按人头的套餐菜品 ID 填进去。</p>
 <?php endif; ?>
 
@@ -341,7 +342,7 @@ pageHeader('开台核对', 'open');
     每一档内部按桌号排（2 排在 10 前面，纯数字桌号排在文字桌号之前）。
   </p>
   <p class="note">
-    <span class="state s-skip">免核对</span> 当前的判定规则（在 config.php 里调整）：
+    <span class="state s-skip">免核对</span> 当前的判定规则：
     <?php if ($skipRules['tables']): ?>
       桌号匹配 <?php foreach ($skipRules['tables'] as $i => $p): ?><?= $i ? '、' : '' ?><code><?= h($p) ?></code><?php endforeach; ?>
       （大小写不敏感，<code>*</code> 是通配符，在 <code>no_combo_tables</code> 里改）
@@ -349,8 +350,8 @@ pageHeader('开台核对', 'open');
       桌号规则为空（<code>no_combo_tables</code>），所有台都要核对
     <?php endif; ?>
     <?php if (!$skipCustom): ?>
-      —— 这是<strong>内置默认值</strong>，你的 config.php 里还没写 <code>no_combo_tables</code>；
-      想改（比如再加个 <code>Barra*</code>）就把这一项加进去
+      —— 这是 <code>lib/settings.php</code> 里的<strong>内置默认值</strong>，会跟着程序升级走；
+      想改（比如再加个 <code>Barra*</code>）就把 <code>no_combo_tables</code> 写进 config.php
     <?php endif; ?>
     <?php if ($skipRules['eat_types']): ?>
       ；另外 <code>eat_type</code> 为
@@ -374,7 +375,9 @@ pageHeader('开台核对', 'open');
 
   <details class="station" style="margin-top:18px">
     <summary><span class="pcname">当前算作「按人头套餐」的菜品</span>
-      <span class="pcmeta"><?= num(count($comboIds)) ?> 个 · 在 config.php 的 combo_item_ids 里调整</span></summary>
+      <span class="pcmeta"><?= num(count($comboIds)) ?> 个 · combo_item_ids<?=
+        array_key_exists('combo_item_ids', Db::overrides()) ? '（config.php 里配的）'
+                                                           : '（lib/settings.php 默认值）' ?></span></summary>
     <div style="padding:14px 16px">
       <?php if (!$comboIds): ?>
         <p class="empty">清单为空。</p>

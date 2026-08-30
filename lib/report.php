@@ -201,29 +201,27 @@ final class Report
     public const OPEN_SKIP    = 'skip';     // 外带之类，本来就没有人头套餐，不用核对
 
     /**
-     * config.php 里没写 no_combo_tables 时用的默认桌号规则。
+     * 从配置里读出免核对规则，缺项退回 lib/settings.php 的默认值。
      *
-     * 默认值放在代码里而不是只写在 config.php，是因为 config.php 是用户自己维护的
-     * （里面有数据库密码），升级程序时通常不会跟着换 —— 默认值写在那边的话，
-     * 老的 config 会让这个功能整个失效。
-     */
-    public const DEFAULT_NO_COMBO_TABLES = ['Llevar*', '外带*'];
-
-    /**
-     * 从 config 里读出免核对规则，缺项套用默认值。
+     * 正常情况下 Db::config() 已经把默认值合进来了，这里的兜底是为了
+     * 直接传进来的裸配置数组（测试、或万一有人绕过 Db 读 config.php）——
+     * 缺项时功能应当照常生效，而不是静默失灵。
      *
      * 用 array_key_exists 区分「没写这一项」和「写了但留空」：
-     * 老版本 config.php 没这一项 → 套默认；明确写成 [] → 表示「不要跳过任何台」，必须尊重。
+     * 没写 → 套默认；明确写成 [] → 表示「所有台都要核对」，必须尊重。
      *
      * @return array ['tables' => 桌号通配符[], 'eat_types' => eat_type 取值[]]
      */
     public static function skipRules(array $cfg): array
     {
-        $tables = array_key_exists('no_combo_tables', $cfg)
-            ? (array) $cfg['no_combo_tables']
-            : self::DEFAULT_NO_COMBO_TABLES;
+        if (!array_key_exists('no_combo_tables', $cfg)) {
+            // 默认值只有 settings.php 一个出处，避免两边抄一份抄岔了。
+            // 用 require 而不是 require_once —— 后者第二次调用只返回 true。
+            $defaults = (array) require __DIR__ . '/settings.php';
+            $cfg['no_combo_tables'] = $defaults['no_combo_tables'] ?? [];
+        }
 
-        $tables = array_map(static fn($v) => trim((string) $v), $tables);
+        $tables = array_map(static fn($v) => trim((string) $v), (array) $cfg['no_combo_tables']);
 
         return [
             'tables'    => array_values(array_filter($tables, static fn($v) => $v !== '')),

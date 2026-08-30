@@ -388,10 +388,11 @@ ok('单字通配只吃一个字符',    !Report::isNoComboTable('Llevar12', ['Ll
 
 // ---- 规则的读取与默认值 ----
 // config.php 是用户自己维护的（里面有数据库密码），升级程序时多半不会跟着换。
-// 所以缺项必须套用代码里的默认值，否则功能会静默失效。
+// 所以功能默认值放在随程序更新的 lib/settings.php 里，缺项时必须能兜住。
+$settings = require __DIR__ . '/../lib/settings.php';
 $oldCfg = ['host' => 'x', 'combo_item_ids' => [1890]];   // 老版本 config，没有这两项
-eq('老 config 套用默认桌号规则',
-   Report::skipRules($oldCfg)['tables'], Report::DEFAULT_NO_COMBO_TABLES);
+eq('老 config 套用 settings.php 的桌号规则',
+   Report::skipRules($oldCfg)['tables'], $settings['no_combo_tables']);
 ok('默认规则能盖住 Llevar',
    Report::isNoComboTable('Llevar', Report::skipRules($oldCfg)['tables']));
 eq('老 config 的 eat_type 规则为空', Report::skipRules($oldCfg)['eat_types'], []);
@@ -403,9 +404,34 @@ eq('规则里的空白项被剔除',
    Report::skipRules(['no_combo_tables' => ['  Llevar*  ', '', '  ']])['tables'], ['Llevar*']);
 eq('eat_types 转成整数',
    Report::skipRules(['no_combo_eat_types' => ['3', 5]])['eat_types'], [3, 5]);
-// 仓库里的 config.php 本身也要能直接用
-ok('随包的 config.php 带默认外带规则',
-   Report::isNoComboTable('Llevar', Report::skipRules(require __DIR__ . '/../config.php')['tables']));
+// 默认值只有 settings.php 一个出处，config.php 里不该再抄一份
+ok('settings.php 的默认规则覆盖 Llevar',
+   Report::isNoComboTable('Llevar', Report::skipRules($settings)['tables']));
+$shipped = require __DIR__ . '/../config.php';
+ok('随包的 config.php 不重复写功能参数',
+   !array_key_exists('no_combo_tables', $shipped)
+   && !array_key_exists('combo_item_ids', $shipped)
+   && !array_key_exists('day_start', $shipped));
+
+// ---- 两层配置：settings.php 默认值 + config.php 覆盖 ----
+// 这是外带免核对翻车后加的防线：功能参数不能只存在于 config.php 里，
+// 否则站点沿用旧 config 时新功能读不到值，会静默失效。
+$merged = Db::config();
+foreach (['day_start', 'day_end', 'night_start', 'night_end', 'day_cut_hour',
+          'max_range_days', 'combo_item_ids', 'no_combo_tables', 'no_combo_eat_types',
+          'open_table_warn_hours', 'ack_hours', 'driver'] as $k) {
+    ok("功能参数 {$k} 有默认值", array_key_exists($k, $settings));
+    ok("生效配置里能读到 {$k}", array_key_exists($k, $merged));
+}
+foreach (['host', 'port', 'dbname', 'user', 'pass', 'password'] as $k) {
+    ok("连接/密码项 {$k} 在 config.php 里", array_key_exists($k, $shipped));
+    ok("连接/密码项 {$k} 不在 settings.php 里", !array_key_exists($k, $settings));
+}
+eq('config.php 没写的键用 settings.php 的值',
+   $merged['combo_item_ids'], $settings['combo_item_ids']);
+eq('config.php 写了的键优先', $merged['host'], $shipped['host']);
+eq('Db::overrides() 只给出 config.php 里的键',
+   array_keys(Db::overrides()), array_keys($shipped));
 
 // ---- eat_type 规则 ----
 ok('eat_type 命中即免核对', Report::skipsComboCheck('12', 3, ['eat_types' => [3]]));
