@@ -360,9 +360,75 @@ ok('关闭问题优先后按桌号排',
 eq('关闭问题优先后第一个是最小桌号', $byTbl[0]['table'], '51');
 
 foreach ([Report::OPEN_OK, Report::OPEN_SHORT, Report::OPEN_OVER,
-          Report::OPEN_NONE, Report::OPEN_NOGUEST] as $st) {
+          Report::OPEN_NONE, Report::OPEN_NOGUEST, Report::OPEN_SKIP] as $st) {
     ok("状态 {$st} 有中文标签", Report::openStateLabel($st) !== $st);
 }
+
+// =====================================================================
+echo "\n【2e2】外带等免核对的台\n";
+// =====================================================================
+
+// ---- 桌号通配符匹配 ----
+$pat = ['Llevar*', '外带*'];
+ok('Llevar 命中',            Report::isNoComboTable('Llevar', $pat));
+ok('大小写不敏感',            Report::isNoComboTable('LLEVAR', $pat));
+ok('通配后缀命中',            Report::isNoComboTable('Llevar 2', $pat));
+ok('带横线的也命中',          Report::isNoComboTable('llevar-03', $pat));
+ok('中文外带命中',            Report::isNoComboTable('外带1', $pat));
+ok('前后空格不影响',          Report::isNoComboTable('  Llevar  ', $pat));
+ok('普通桌号不命中',          !Report::isNoComboTable('51', $pat));
+ok('不做部分匹配（前缀要对上）', !Report::isNoComboTable('A-Llevar', $pat));
+ok('空桌号不命中',            !Report::isNoComboTable('', $pat));
+ok('空规则时谁都不命中',       !Report::isNoComboTable('Llevar', []));
+ok('规则里的空串被忽略',       !Report::isNoComboTable('随便什么桌', ['', '   ']));
+// 通配符必须是我们自己的语义，不能让正则元字符漏进去
+ok('点号只当普通字符',        !Report::isNoComboTable('LlevarX', ['Llevar.']));
+ok('单字通配 ? 生效',          Report::isNoComboTable('Llevar1', ['Llevar?']));
+ok('单字通配只吃一个字符',    !Report::isNoComboTable('Llevar12', ['Llevar?']));
+
+// ---- eat_type 规则 ----
+ok('eat_type 命中即免核对', Report::skipsComboCheck('12', 3, ['eat_types' => [3]]));
+ok('eat_type 不命中',       !Report::skipsComboCheck('12', 0, ['eat_types' => [3]]));
+ok('eat_types 留空则不生效', !Report::skipsComboCheck('12', 3, ['eat_types' => []]));
+ok('桌号与 eat_type 任一命中即可',
+   Report::skipsComboCheck('Llevar', 0, ['tables' => ['Llevar*'], 'eat_types' => [3]]));
+ok('两条规则都空时不跳过',   !Report::skipsComboCheck('Llevar', 3, []));
+
+// ---- 接入核对结果 ----
+$skipRules = ['tables' => ['Llevar*'], 'eat_types' => []];
+$otSkip = Report::buildOpenTables($heads, $counts, 4, [], $skipRules);
+$bySkip = [];
+foreach ($otSkip['rows'] as $r) { $bySkip[$r['id']] = $r; }
+
+eq('Llevar 判为免核对', $bySkip[5]['state'], Report::OPEN_SKIP);
+ok('免核对的行带 skip 标记', $bySkip[5]['skip']);
+ok('普通台不带 skip 标记', !$bySkip[1]['skip']);
+eq('未加规则时 Llevar 是「未填人数」', $by[5]['state'], Report::OPEN_NOGUEST);
+// 原本 4 个问题台（2/3/4/5），Llevar 免核对后只剩 3 个
+eq('免核对的台不计入待处理', $otSkip['sum']['problem'], 3);
+eq('免核对单独计数', $otSkip['sum']['skip'], 1);
+eq('免核对的台仍列在明细里', count($otSkip['rows']), count($ot['rows']));
+eq('免核对不影响开台数', $otSkip['sum']['tables'], $ot['sum']['tables']);
+eq('免核对不影响金额合计', $otSkip['sum']['amount'], $ot['sum']['amount']);
+
+// 免核对的台排在最后
+$skipSorted = Report::sortOpenTables($otSkip['rows']);
+eq('免核对的台排在最末', end($skipSorted)['state'], Report::OPEN_SKIP);
+
+// 免核对的台不接受人工确认（就算会话里留着旧记录也不认）
+$otSkipAck = Report::buildOpenTables($heads, $counts, 4,
+    [5 => ['fp' => $bySkip[5]['fp'], 'at' => time()]], $skipRules);
+$ackedSkip = null;
+foreach ($otSkipAck['rows'] as $r) { if ($r['id'] === 5) { $ackedSkip = $r; } }
+ok('免核对的台不显示为已确认', !$ackedSkip['acked']);
+eq('免核对的台不计入已确认数', $otSkipAck['sum']['acked'], 0);
+
+// eat_type 规则同样能生效（5 号单的 eat_type 是 3）
+$otEat = Report::buildOpenTables($heads, $counts, 4, [], ['eat_types' => [3]]);
+$byEat = [];
+foreach ($otEat['rows'] as $r) { $byEat[$r['id']] = $r; }
+eq('按 eat_type 也能判为免核对', $byEat[5]['state'], Report::OPEN_SKIP);
+eq('按 eat_type 免核对后问题台同样减一', $otEat['sum']['problem'], 3);
 
 // =====================================================================
 echo "\n【2f2】开台核对的人工确认\n";
@@ -516,6 +582,18 @@ ok('已确认的台不算「有问题」', strpos($openSrc, "&& !\$r['acked']") 
 ok('确认状态不写数据库',
    strpos((string) file_get_contents(__DIR__ . '/../lib/ack.php'), 'Db::select') === false);
 
+// ---- 页面：免核对规则来自 config，且不参与「只看有问题的台」----
+ok('免核对规则从 config 读取', strpos($openSrc, "no_combo_tables") !== false
+   && strpos($openSrc, 'no_combo_eat_types') !== false);
+ok('免核对规则传给了核对函数',
+   strpos($openSrc, 'Report::buildOpenTables($heads, $counts, $warnHours, Ack::all(), $skipRules)') !== false);
+ok('「只看有问题」会滤掉免核对的台',
+   strpos($openSrc, "\$r['state'] !== Report::OPEN_SKIP") !== false);
+ok('免核对的台不给确认按钮',
+   strpos($openSrc, "\$r['state'] === Report::OPEN_SKIP") !== false);
+ok('服务端拒绝确认免核对的台', strpos($openSrc, '本来就免核对') !== false);
+ok('页面上列出了当前生效的免核对规则', strpos($openSrc, '当前的判定规则') !== false);
+
 // =====================================================================
 echo "\n【2e】登录\n";
 // =====================================================================
@@ -584,6 +662,9 @@ ok('有吸附首列规则', strpos($css, 'table.grid.stick') !== false);
 ok('有手机紧凑列表规则', strpos($css, '.openlist') !== false);
 ok('紧凑列表默认隐藏（只在手机显示）', strpos($css, '.openlist{display:none') !== false);
 ok('手机上隐藏次要列', strpos($css, '.hide-sm{display:none}') !== false);
+ok('免核对状态有样式', strpos($css, '.state.s-skip') !== false);
+ok('免核对的行被压暗', strpos($css, 'li.row-skip') !== false
+   && strpos($css, 'tr.row-skip td') !== false);
 ok('登录页适配小屏高度', strpos($css, '100dvh') !== false);
 
 // 两套页面模板都要有 viewport，否则手机上会按桌面宽度缩放

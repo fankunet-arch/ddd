@@ -24,6 +24,12 @@ require_once __DIR__ . '/lib/view.php';
 $cfg        = Db::config();
 $comboIds   = array_map('intval', (array) ($cfg['combo_item_ids'] ?? []));
 $warnHours  = (int) ($cfg['open_table_warn_hours'] ?? 4);
+// 外带（Llevar）之类的台不按人头核对，规则写在 config.php 里
+$skipRules  = [
+    'tables'    => array_values(array_filter(array_map(
+        static fn($v) => trim((string) $v), (array) ($cfg['no_combo_tables'] ?? [])))),
+    'eat_types' => array_map('intval', (array) ($cfg['no_combo_eat_types'] ?? [])),
+];
 $onlyOpen   = !isset($_GET['scope']) || q('scope') !== 'all';
 $onlyIssues = qbool('issues');
 // 二次确认：ask=订单号 时，该行原地展开「确定吗？」，避免误点就生效
@@ -57,7 +63,7 @@ try {
 
     // ---- 处理人工确认 / 撤销（POST + CSRF，提交后跳转回来）----
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        $fresh = Report::buildOpenTables($heads, $counts, $warnHours);
+        $fresh = Report::buildOpenTables($heads, $counts, $warnHours, [], $skipRules);
         $byId  = [];
         foreach ($fresh['rows'] as $r) {
             $byId[$r['id']] = $r;
@@ -79,6 +85,8 @@ try {
             $row = $byId[$id] ?? null;
             if ($row === null) {
                 $msg = ['err', '这张单已经不在当前列表里了'];
+            } elseif (!empty($row['skip'])) {
+                $msg = ['err', '这张单本来就免核对，不需要确认'];
             } elseif ((string) ($_POST['fp'] ?? '') !== $row['fp']) {
                 // 从页面渲染到点确认之间，人数或套餐变了 —— 不能拿旧状态盖章
                 $msg = ['err', '这张单的人数或套餐份数刚刚变了，请重新核对后再确认'];
@@ -96,7 +104,7 @@ try {
         exit;
     }
 
-    $data = Report::buildOpenTables($heads, $counts, $warnHours, Ack::all());
+    $data = Report::buildOpenTables($heads, $counts, $warnHours, Ack::all(), $skipRules);
 } catch (Throwable $e) {
     $error = '查询失败：' . $e->getMessage();
 }
@@ -155,9 +163,10 @@ pageHeader('开台核对', 'open');
   $S    = $data['sum'];
   $rows = Report::sortOpenTables($data['rows']);
   if ($onlyIssues) {
-      // 已人工确认的不算「有问题」
+      // 已人工确认的、以及外带这类免核对的，都不算「有问题」
       $rows = array_values(array_filter($rows,
-          fn($r) => $r['state'] !== Report::OPEN_OK && !$r['acked']));
+          fn($r) => $r['state'] !== Report::OPEN_OK
+                 && $r['state'] !== Report::OPEN_SKIP && !$r['acked']));
   }
 ?>
 
@@ -175,6 +184,9 @@ pageHeader('开台核对', 'open');
       <dl>
         <?php if ($S['acked'] > 0): ?>
           <dt>已人工确认</dt><dd><?= num($S['acked']) ?></dd>
+        <?php endif; ?>
+        <?php if ($S['skip'] > 0): ?>
+          <dt>外带·免核对</dt><dd><?= num($S['skip']) ?></dd>
         <?php endif; ?>
         <?php if ($S['stale'] > 0): ?>
           <dt>开台超 <?= (int) $warnHours ?> 小时</dt><dd><?= num($S['stale']) ?></dd>
@@ -196,11 +208,14 @@ pageHeader('开台核对', 'open');
   $fmt = static function (array $r): array {
       return [
           'cls'   => ['ok' => '', 'short' => 'row-bad', 'none' => 'row-bad',
-                      'over' => 'row-warn', 'noguest' => 'row-warn'][$r['state']] ?? '',
+                      'over' => 'row-warn', 'noguest' => 'row-warn',
+                      'skip' => 'row-skip'][$r['state']] ?? '',
           'table' => $r['table'] !== '' ? $r['table'] : '#' . $r['id'],
           'dur'   => $r['minutes'] === null ? '—'
                      : intdiv($r['minutes'], 60) . ':' . str_pad((string) ($r['minutes'] % 60), 2, '0', STR_PAD_LEFT),
-          'diff'  => $r['guests'] > 0 ? (($r['diff'] > 0 ? '+' : '') . qty($r['diff'])) : '—',
+          // 免核对的台不做人数/套餐比对，差额没有意义，一律显示 —
+          'diff'  => ($r['guests'] > 0 && empty($r['skip']))
+                     ? (($r['diff'] > 0 ? '+' : '') . qty($r['diff'])) : '—',
       ];
   };
   ?>
@@ -217,8 +232,8 @@ pageHeader('开台核对', 'open');
                . '<input type="hidden" name="act" value="unack">'
                . '<button class="btn-mini" type="submit">撤销</button></form>';
       }
-      if ($r['state'] === Report::OPEN_OK) {
-          return '';                       // 本来就一致，没什么可确认的
+      if ($r['state'] === Report::OPEN_OK || $r['state'] === Report::OPEN_SKIP) {
+          return '';                       // 一致的、免核对的，都没什么可确认的
       }
       if ($askId === $r['id']) {
           return '<form method="post" class="ackform asking">' . $csrf
@@ -252,8 +267,10 @@ pageHeader('开台核对', 'open');
           <?php if ($r['guests'] > 0): ?>
             <span><b><?= num($r['guests']) ?></b> 人</span>
           <?php endif; ?>
-          <span>套餐 <b><?= qty($r['combo']) ?></b> 份</span>
-          <?php if ($r['guests'] > 0 && abs($r['diff']) > 0.001): ?>
+          <?php if (empty($r['skip']) || $r['combo'] > 0): ?>
+            <span>套餐 <b><?= qty($r['combo']) ?></b> 份</span>
+          <?php endif; ?>
+          <?php if ($r['guests'] > 0 && empty($r['skip']) && abs($r['diff']) > 0.001): ?>
             <span class="d <?= $r['state'] === Report::OPEN_OVER ? 'over' : '' ?>"><?= h($f['diff']) ?></span>
           <?php endif; ?>
           <span class="t <?= $r['stale'] ? 'stale' : '' ?>"><?= h($f['dur']) ?></span>
@@ -287,7 +304,7 @@ pageHeader('开台核对', 'open');
             <?php if ($r['checks'] > 1): ?><span class="tag">分 <?= (int) $r['checks'] ?> 单</span><?php endif; ?>
             <?php if ($r['eat_type'] === 3): ?><span class="tag">外带</span><?php endif; ?></td>
         <td class="n strong"><?= $r['guests'] > 0 ? num($r['guests']) : '—' ?></td>
-        <td class="n strong"><?= qty($r['combo']) ?></td>
+        <td class="n strong"><?= (!empty($r['skip']) && $r['combo'] <= 0) ? '—' : qty($r['combo']) ?></td>
         <td class="n"><?= h($f['diff']) ?></td>
         <td><?php if ($r['acked']): ?>
               <span class="state s-ack">已确认</span>
@@ -316,12 +333,29 @@ pageHeader('开台核对', 'open');
     <span class="state s-short">套餐打少了</span> 份数比人数少。
     <span class="state s-over">套餐打多了</span> 份数比人数多。
     <span class="state s-noguest">未填人数</span> 开台时没填人数，无法比对。
+    <span class="state s-skip">免核对</span> 外带（Llevar）这类台没有堂食人数、也不会点按人头的
+    自助套餐，不参与核对，也不计入「需要核对的台」。
     <br>
     只点单品不吃自助的客人，本来就不会有套餐 —— 这类会显示成「未打套餐」，属正常，
     请结合金额与菜品数判断。「已开台」按 时:分 显示，超过 <?= (int) $warnHours ?> 小时会标红。
     <br>
-    排序：<strong>需要核对的台在最前，其次是已人工确认的，最后是一致的</strong>；
+    排序：<strong>需要核对的台在最前，其次是已人工确认的，然后是一致的，免核对的排最后</strong>；
     每一档内部按桌号排（2 排在 10 前面，纯数字桌号排在文字桌号之前）。
+  </p>
+  <p class="note">
+    <span class="state s-skip">免核对</span> 当前的判定规则（在 config.php 里调整）：
+    <?php if ($skipRules['tables']): ?>
+      桌号匹配 <?php foreach ($skipRules['tables'] as $i => $p): ?><?= $i ? '、' : '' ?><code><?= h($p) ?></code><?php endforeach; ?>
+      （大小写不敏感，<code>*</code> 是通配符，在 <code>no_combo_tables</code> 里改）
+    <?php else: ?>
+      桌号规则为空（<code>no_combo_tables</code>）
+    <?php endif; ?>
+    <?php if ($skipRules['eat_types']): ?>
+      ；另外 <code>eat_type</code> 为
+      <?= h(implode('、', array_map('strval', $skipRules['eat_types']))) ?> 的单也免核对
+      （<code>no_combo_eat_types</code>）
+    <?php endif; ?>。
+    新增外带台、改了桌号命名后记得回来更新，否则会一直报「未打套餐」。
   </p>
   <p class="note">
     <span class="state s-ack">已确认</span>

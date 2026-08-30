@@ -198,6 +198,47 @@ final class Report
     public const OPEN_OVER    = 'over';     // 套餐打多了
     public const OPEN_NONE    = 'none';     // 一份套餐都没打
     public const OPEN_NOGUEST = 'noguest';  // 没填人数，没法比对
+    public const OPEN_SKIP    = 'skip';     // 外带之类，本来就没有人头套餐，不用核对
+
+    /**
+     * 桌号是否属于「不按人头核对」的台。
+     *
+     * 大小写不敏感，支持 * 通配符（'Llevar*' 能匹配 Llevar、LLEVAR 2、Llevar-03）。
+     * 桌号两端的空格会先去掉，避免 POS 里手滑多打一个空格就匹配不上。
+     */
+    public static function isNoComboTable(string $table, array $patterns): bool
+    {
+        $name = trim($table);
+        if ($name === '' || !$patterns) {
+            return false;
+        }
+        foreach ($patterns as $p) {
+            $p = trim((string) $p);
+            if ($p === '') {
+                continue;
+            }
+            // preg_quote 会把 * ? 也转义掉，这里再换回通配符语义
+            $re = '/^' . str_replace(['\*', '\?'], ['.*', '.'], preg_quote($p, '/')) . '$/i';
+            if (preg_match($re, $name) === 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 这张台要不要跳过「人数 vs 套餐」核对。
+     *
+     * @param array $skip ['tables' => 桌号通配符[], 'eat_types' => eat_type 取值[]]
+     */
+    public static function skipsComboCheck(string $table, int $eatType, array $skip): bool
+    {
+        if (self::isNoComboTable($table, (array) ($skip['tables'] ?? []))) {
+            return true;
+        }
+        $types = array_map('intval', (array) ($skip['eat_types'] ?? []));
+        return $types !== [] && in_array($eatType, $types, true);
+    }
 
     /**
      * 把开台列表和套餐份数合起来，逐桌判断人数与套餐是否对得上。
@@ -207,9 +248,11 @@ final class Report
      * @param int   $warnHours 开台超过几小时算滞留
      * @param array $acks    人工确认记录 [order_head_id => ['fp'=>..,'at'=>..]]，
      *                       指纹对不上（人数或套餐份数变了）就当作没确认过
+     * @param array $skip    免核对规则 ['tables'=>[..], 'eat_types'=>[..]]，
+     *                       命中的台（外带等）判为 OPEN_SKIP，不算问题台
      */
     public static function buildOpenTables(array $heads, array $counts, int $warnHours = 4,
-                                           array $acks = []): array
+                                           array $acks = [], array $skip = []): array
     {
         $byId = [];
         foreach ($counts as $c) {
@@ -218,11 +261,12 @@ final class Report
 
         $rows = [];
         $sum  = ['tables' => 0, 'guests' => 0, 'combo' => 0.0, 'amount' => 0.0,
-                 'problem' => 0, 'acked' => 0, 'stale' => 0];
+                 'problem' => 0, 'acked' => 0, 'stale' => 0, 'skip' => 0];
         $now  = time();
 
         foreach ($heads as $h) {
             $id     = (int) $h['order_head_id'];
+            $table  = (string) ($h['table_name'] ?? '');
             $guests = (int) $h['guests'];
             $c      = $byId[$id] ?? null;
             $combo  = $c ? (float) $c['combo_qty'] : 0.0;
@@ -230,7 +274,13 @@ final class Report
             $lines  = $c ? (int) $c['lines_cnt']   : 0;
             $diff   = $combo - $guests;
 
-            if ($guests <= 0) {
+            // 外带（Llevar）之类的台没有堂食人数、也不会点按人头的自助套餐，
+            // 拿人数去比对只会一直报「未打套餐」，直接判为免核对。
+            $noCheck = self::skipsComboCheck($table, (int) ($h['eat_type'] ?? 0), $skip);
+
+            if ($noCheck) {
+                $state = self::OPEN_SKIP;
+            } elseif ($guests <= 0) {
                 $state = self::OPEN_NOGUEST;
             } elseif (abs($diff) < 0.001) {
                 $state = self::OPEN_OK;
@@ -246,17 +296,19 @@ final class Report
             $mins = $t0 ? (int) floor(($now - $t0) / 60) : null;
             $stale = $mins !== null && $mins >= $warnHours * 60;
 
-            // 人工确认：只有指纹一致才算数，人数或套餐一变就自动作废
+            // 人工确认：只有指纹一致才算数，人数或套餐一变就自动作废。
+            // 免核对的台本来就没有待确认的事，不显示确认状态。
             $fp    = ((int) $guests) . ':' . ((int) round($combo * 100));
             $a     = $acks[$id] ?? null;
-            $acked = is_array($a) && ($a['fp'] ?? null) === $fp;
+            $acked = !$noCheck && is_array($a) && ($a['fp'] ?? null) === $fp;
 
             $rows[] = [
                 'acked'    => $acked,
                 'acked_at' => $acked ? (int) ($a['at'] ?? 0) : null,
                 'fp'       => $fp,
                 'id'       => $id,
-                'table'    => (string) ($h['table_name'] ?? ''),
+                'table'    => $table,
+                'skip'     => $noCheck,
                 'guests'   => $guests,
                 'combo'    => $combo,
                 'diff'     => $diff,
@@ -278,7 +330,9 @@ final class Report
             $sum['combo']  += $combo;
             $sum['amount'] += (float) $h['amount'];
             // 已人工确认的不再算作待处理，但单独计数，方便看确认了多少台
-            if ($state !== self::OPEN_OK) {
+            if ($state === self::OPEN_SKIP) {
+                $sum['skip']++;
+            } elseif ($state !== self::OPEN_OK) {
                 if ($acked) {
                     $sum['acked']++;
                 } else {
@@ -293,7 +347,7 @@ final class Report
         return ['rows' => $rows, 'sum' => $sum];
     }
 
-    /** 问题桌排前面，其次按开台时间；方便一眼看到要处理的 */
+    /** 问题桌排前面，组内按桌号；方便一眼看到要处理的 */
     public static function sortOpenTables(array $rows, bool $problemFirst = true): array
     {
         $rank = [
@@ -302,6 +356,7 @@ final class Report
             self::OPEN_OVER    => 2,
             self::OPEN_NOGUEST => 3,
             self::OPEN_OK      => 4,
+            self::OPEN_SKIP    => 5,   // 免核对的（外带）压到最后，不占视线
         ];
         usort($rows, static function ($a, $b) use ($rank, $problemFirst) {
             if ($problemFirst) {
@@ -331,6 +386,7 @@ final class Report
             self::OPEN_OVER    => '套餐打多了',
             self::OPEN_NONE    => '未打套餐',
             self::OPEN_NOGUEST => '未填人数',
+            self::OPEN_SKIP    => '免核对',
         ][$state] ?? $state;
     }
 
