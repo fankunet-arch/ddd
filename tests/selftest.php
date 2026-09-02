@@ -531,6 +531,151 @@ eq('按 eat_type 也能判为免核对', $byEat[5]['state'], Report::OPEN_SKIP);
 eq('按 eat_type 免核对后问题台同样减一', $otEat['sum']['problem'], 3);
 
 // =====================================================================
+echo "\n【2e2b】期间对比\n";
+// =====================================================================
+
+// ---- 区间推算：用户的原话是「今天周三，就对比上周四到今天 与 上上周四到上周三」----
+[$c1, $c2] = Biz::lastDays(7, '2026-09-02');          // 2026-09-02 是周三
+eq('近 7 天起点是上周四', $c1 . ' ' . Report::dow($c1), '2026-08-27 周四');
+eq('近 7 天终点是今天（周三）', $c2 . ' ' . Report::dow($c2), '2026-09-02 周三');
+eq('近 7 天正好 7 天', Biz::rangeDays($c1, $c2), 7);
+
+[$p1, $p2] = Biz::prevRange($c1, $c2);
+eq('上期起点是上上周四', $p1 . ' ' . Report::dow($p1), '2026-08-20 周四');
+eq('上期终点是上周三', $p2 . ' ' . Report::dow($p2), '2026-08-26 周三');
+eq('上期也是 7 天', Biz::rangeDays($p1, $p2), 7);
+ok('两期首尾相接不重叠', strtotime($p2) + 86400 === strtotime($c1));
+ok('等长时星期几自动对齐',
+   Report::dow($c1) === Report::dow($p1) && Report::dow($c2) === Report::dow($p2));
+
+// 其他长度
+eq('近 1 天就是今天', Biz::lastDays(1, '2026-09-02'), ['2026-09-02', '2026-09-02']);
+eq('近 30 天起点', Biz::lastDays(30, '2026-09-02')[0], '2026-08-04');
+eq('0 天按 1 天处理', Biz::lastDays(0, '2026-09-02'), ['2026-09-02', '2026-09-02']);
+// 跨月、跨年、闰年
+eq('上期跨月正确', Biz::prevRange('2026-03-01', '2026-03-07'), ['2026-02-22', '2026-02-28']);
+eq('上期跨年正确', Biz::prevRange('2026-01-01', '2026-01-07'), ['2025-12-25', '2025-12-31']);
+eq('闰年 2 月正确', Biz::prevRange('2024-03-01', '2024-03-01'), ['2024-02-29', '2024-02-29']);
+eq('整月对比上一个月', Biz::prevRange('2026-08-01', '2026-08-31'), ['2026-07-01', '2026-07-31']);
+eq('日期列表长度', count(Biz::dateList('2026-08-27', '2026-09-02')), 7);
+eq('日期列表跨月正确', Biz::dateList('2026-08-31', '2026-09-02'),
+   ['2026-08-31', '2026-09-01', '2026-09-02']);
+
+// ---- 涨跌 ----
+eq('涨跌：100 → 125', Report::delta(125, 100), [25.0, 0.25]);
+eq('涨跌：100 → 75',  Report::delta(75, 100),  [-25.0, -0.25]);
+eq('涨跌：持平',       Report::delta(100, 100), [0.0, 0.0]);
+eq('上期为 0 时不算百分比（不能除以 0）', Report::delta(50, 0), [50.0, null]);
+eq('两期都是 0',       Report::delta(0, 0),     [0.0, null]);
+// 上期为负（退款多于收入）时用绝对值做分母，否则涨跌方向会反
+eq('上期为负时方向不反', Report::delta(-50, -100), [50.0, 0.5]);
+
+// ---- 营业额对比 ----
+$mkDay = static fn($d, $seg, $amt, $g, $ck) => ['biz_date' => $d, 'seg' => $seg,
+    'checks' => $ck, 'guests' => $g, 'actual' => $amt, 'original' => $amt,
+    'discount' => 0, 'service' => 0, 'tax' => 0, 'should_amt' => $amt, 'ret' => 0];
+$curP  = Report::pivotSales([$mkDay('2026-08-27', 'day', 100, 4, 2),
+                             $mkDay('2026-08-28', 'night', 200, 6, 3)]);
+$prevP = Report::pivotSales([$mkDay('2026-08-20', 'day', 80, 4, 2),
+                             $mkDay('2026-08-21', 'night', 160, 4, 2)]);
+$cs = Report::compareSales($curP, $prevP);
+eq('全天营业额：本期', $cs['total']['actual']['cur'], 300.0);
+eq('全天营业额：上期', $cs['total']['actual']['prev'], 240.0);
+eq('全天营业额：涨跌额', $cs['total']['actual']['diff'], 60.0);
+eq('全天营业额：涨跌率 25%', round($cs['total']['actual']['rate'] * 100, 1), 25.0);
+eq('白天单独对比', $cs['day']['actual']['diff'], 20.0);
+eq('晚上单独对比', $cs['night']['actual']['diff'], 40.0);
+eq('人数对比', $cs['total']['guests']['diff'], 2.0);
+// 人均要各期各自算完再比，不能拿差额相除
+eq('本期人均 300/10', round($cs['total']['per_guest']['cur'], 2), 30.0);
+eq('上期人均 240/8',  round($cs['total']['per_guest']['prev'], 2), 30.0);
+eq('人均持平（总额涨了但人也多了）', round($cs['total']['per_guest']['diff'], 6), 0.0);
+
+// 上期完全没数据时不能崩
+$empty = Report::compareSales($curP, Report::pivotSales([]));
+eq('上期无数据：本期照常', $empty['total']['actual']['cur'], 300.0);
+eq('上期无数据：涨跌率为 null', $empty['total']['actual']['rate'], null);
+eq('两期都无数据', Report::compareSales(Report::pivotSales([]), Report::pivotSales([]))
+   ['total']['actual']['cur'], 0.0);
+
+// ---- 逐日对照 ----
+$cd = Biz::dateList('2026-08-27', '2026-09-02');
+$pd = Biz::dateList('2026-08-20', '2026-08-26');
+$rows = Report::compareDaily($cd, $pd, $curP['days'], $prevP['days'], 'total');
+eq('逐日对照 7 行', count($rows), 7);
+ok('每一行的星期几都对齐', (static function () use ($rows) {
+    foreach ($rows as $r) { if (!$r['same_dow']) return false; }
+    return true; })());
+eq('第 1 行本期是周四', $rows[0]['cur_dow'], '周四');
+eq('第 1 行上期也是周四', $rows[0]['prev_dow'], '周四');
+eq('第 1 行本期金额', $rows[0]['cur_amt'], 100.0);
+eq('第 1 行上期金额', $rows[0]['prev_amt'], 80.0);
+eq('第 1 行涨跌', $rows[0]['amt_diff'], 20.0);
+ok('全部成对', (static function () use ($rows) {
+    foreach ($rows as $r) { if (!$r['paired']) return false; }
+    return true; })());
+
+// 不等长：多出来的天单独列出，不硬凑
+$long = Report::compareDaily(Biz::dateList('2026-08-27', '2026-09-02'),
+                             Biz::dateList('2026-08-24', '2026-08-26'),
+                             $curP['days'], $prevP['days'], 'total');
+eq('不等长时按较长的一边列出', count($long), 7);
+ok('前 3 行成对', $long[0]['paired'] && $long[2]['paired']);
+ok('第 4 行起无对应', !$long[3]['paired']);
+eq('无对应时涨跌为 null', $long[3]['amt_diff'], null);
+eq('无对应时上期日期为 null', $long[3]['prev_date'], null);
+ok('不等长时星期几标记为不一致', !$long[0]['same_dow'] || !$long[1]['same_dow']);
+
+// ---- 菜品／岗位对比 ----
+$curItems  = [1 => ['name' => 'Agua', 'pc_name' => 'bebidas', 'qty' => 9, 'amount' => 22.5],
+              2 => ['name' => 'Ramen', 'pc_name' => '热菜', 'qty' => 4, 'amount' => 36.0],
+              3 => ['name' => '新菜', 'pc_name' => '热菜', 'qty' => 5, 'amount' => 50.0]];
+$prevItems = [1 => ['name' => 'Agua', 'pc_name' => 'bebidas', 'qty' => 5, 'amount' => 12.5],
+              2 => ['name' => 'Ramen', 'pc_name' => '热菜', 'qty' => 6, 'amount' => 54.0],
+              4 => ['name' => '下架菜', 'pc_name' => '热菜', 'qty' => 3, 'amount' => 30.0]];
+$ci = Report::compareItems($curItems, $prevItems, 'qty');
+eq('涨得最多的排最前', $ci[0]['name'], '新菜');
+eq('新菜上期为 0', $ci[0]['prev'], 0.0);
+eq('新菜涨跌率为 null（上期为 0）', $ci[0]['rate'], null);
+eq('跌得最多的排最后', end($ci)['name'], '下架菜');
+eq('本期已下架的菜名从上期取', end($ci)['cur'], 0.0);
+ok('下架菜名字不为空', end($ci)['name'] === '下架菜');
+eq('对比行数（4 个菜都有变化）', count($ci), 4);
+eq('金额一并带出', $ci[0]['cur_amt'], 50.0);
+// 两期都没动静的不占版面
+eq('两期都为 0 的不列出',
+   count(Report::compareItems([9 => ['name' => 'X', 'qty' => 0]], [9 => ['name' => 'X', 'qty' => 0]])), 0);
+
+// 压平函数
+$flat = Report::flattenDishes(Report::buildDishes(
+    [431 => ['name' => 'Agua', 'print_class' => 6, 'is_condiment' => false, 'price' => 2.5]],
+    [6 => 'bebidas'],
+    [['menu_item_id' => 431, 'item_name' => 'Agua', 'seg' => 'day',
+      'qty' => 9, 'times' => 5, 'amount' => 22.5]])['items'], 'total');
+eq('压平后带菜名', $flat[431]['name'], 'Agua');
+eq('压平后带岗位', $flat[431]['pc_name'], 'bebidas');
+eq('压平后带份数', $flat[431]['qty'], 9.0);
+
+$flatS = Report::flattenStations(Report::buildStations([6 => 'bebidas'],
+    [['pc' => 6, 'seg' => 'day', 'orders' => 12, 'items' => 2, 'qty' => 30,
+      'lines_cnt' => 25, 'amount' => 60.0]])['stations'], 'total');
+eq('岗位压平后比的是单量', $flatS[6]['qty'], 12);
+eq('岗位压平后带金额', $flatS[6]['amount'], 60.0);
+
+// ---- 页面 ----
+$cmpSrc = (string) file_get_contents(__DIR__ . '/../compare.php');
+ok('对比页登录保护', strpos($cmpSrc, 'Auth::requireLogin()') !== false);
+ok('对比页校验两个区间',
+   substr_count($cmpSrc, 'Biz::validateRange') >= 1
+   && strpos($cmpSrc, 'Biz::validateRange($prevStart, $prevEnd)') !== false);
+ok('菜品对比默认不查（要勾选）', strpos($cmpSrc, 'if ($withDish)') !== false);
+ok('岗位对比默认不查（要勾选）', strpos($cmpSrc, 'if ($withStn)') !== false);
+ok('含今天时提示数据不完整', strpos($cmpSrc, '今天还没营业完') !== false);
+ok('两期不等长时给出警告', strpos($cmpSrc, '两期天数不一样') !== false);
+ok('导航里有对比入口',
+   strpos((string) file_get_contents(__DIR__ . '/../lib/view.php'), 'compare.php') !== false);
+
+// =====================================================================
 echo "\n【2e3】酒水核对：每人至少一份\n";
 // =====================================================================
 

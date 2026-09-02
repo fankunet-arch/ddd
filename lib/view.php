@@ -77,6 +77,7 @@ function pageHeader(string $title, string $active): void
   $nav = [
       'open'    => ['open.php',    '开台核对',     '开台'],
       'sales'   => ['index.php',   '营业额统计',   '营业额'],
+      'compare' => ['compare.php', '期间对比',     '对比'],
       'dish'    => ['dish.php',    '菜品点单统计', '菜品'],
       'station' => ['station.php', '岗位单量排名', '岗位'],
   ];

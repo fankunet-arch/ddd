@@ -589,6 +589,188 @@ final class Report
         ][$state] ?? $state;
     }
 
+    // ------------------------------------------------------------------
+    // 期间对比
+    // ------------------------------------------------------------------
+
+    /**
+     * 涨跌：返回 [差额, 涨跌率]。
+     *
+     * 上期为 0 时没有"涨了百分之多少"可言（除以 0），返回 null 让页面显示成
+     * 「新增」而不是硬算出一个 100% 或 ∞ —— 这两种写法都会误导人。
+     */
+    public static function delta($cur, $prev): array
+    {
+        $cur  = (float) $cur;
+        $prev = (float) $prev;
+        $diff = $cur - $prev;
+        if (abs($prev) < 0.00001) {
+            return [$diff, null];
+        }
+        return [$diff, $diff / abs($prev)];
+    }
+
+    /**
+     * 两期营业额对比。
+     *
+     * @param array $cur  本期 pivotSales() 的结果
+     * @param array $prev 上期 pivotSales() 的结果
+     * @return array [
+     *   'segs'  => [ seg => [ 指标 => ['cur'=>..,'prev'=>..,'diff'=>..,'rate'=>..] ] ],
+     * ]
+     *   seg 取 day / night / gap / total；指标见 $fields。
+     */
+    public static function compareSales(array $cur, array $prev): array
+    {
+        $fields = ['actual', 'guests', 'checks', 'original', 'discount', 'ret'];
+        $out = [];
+        foreach (['day', 'night', 'gap', 'total'] as $seg) {
+            $c = $cur['total'][$seg]  ?? self::zeroCell();
+            $p = $prev['total'][$seg] ?? self::zeroCell();
+            $row = [];
+            foreach ($fields as $f) {
+                [$d, $r] = self::delta($c[$f] ?? 0, $p[$f] ?? 0);
+                $row[$f] = ['cur' => $c[$f] ?? 0, 'prev' => $p[$f] ?? 0, 'diff' => $d, 'rate' => $r];
+            }
+            // 人均与单均是算出来的，不能直接相减 —— 各期各自算完再比
+            foreach ([['per_guest', 'guests'], ['per_check', 'checks']] as [$k, $by]) {
+                $cv = ($c[$by] ?? 0) > 0 ? ($c['actual'] ?? 0) / $c[$by] : 0.0;
+                $pv = ($p[$by] ?? 0) > 0 ? ($p['actual'] ?? 0) / $p[$by] : 0.0;
+                [$d, $r] = self::delta($cv, $pv);
+                $row[$k] = ['cur' => $cv, 'prev' => $pv, 'diff' => $d, 'rate' => $r];
+            }
+            $out[$seg] = $row;
+        }
+        return $out;
+    }
+
+    /**
+     * 逐日对照：把两期按【位置】配对 —— 本期第 1 天对上期第 1 天。
+     *
+     * 两期等长时（快捷的「近 7 天 vs 前 7 天」必然等长），位置对齐就等于
+     * 星期几对齐：周四对周四、周三对周三。自选出不等长的两段时，多出来的
+     * 那几天单独列出、标成「无对应」，不硬凑。
+     *
+     * @param array $curDates  本期营业日列表
+     * @param array $prevDates 上期营业日列表
+     * @param array $curDays   本期 pivotSales()['days']
+     * @param array $prevDays  上期 pivotSales()['days']
+     * @param string $seg      比哪个时段：day / night / total
+     */
+    public static function compareDaily(array $curDates, array $prevDates,
+                                        array $curDays, array $prevDays,
+                                        string $seg = 'total'): array
+    {
+        $rows = [];
+        $n = max(count($curDates), count($prevDates));
+        for ($i = 0; $i < $n; $i++) {
+            $cd = $curDates[$i]  ?? null;
+            $pd = $prevDates[$i] ?? null;
+            $c  = $cd !== null ? ($curDays[$cd][$seg]  ?? self::zeroCell()) : null;
+            $p  = $pd !== null ? ($prevDays[$pd][$seg] ?? self::zeroCell()) : null;
+
+            [$dAmt, $rAmt] = self::delta($c['actual'] ?? 0, $p['actual'] ?? 0);
+            [$dGue, $rGue] = self::delta($c['guests'] ?? 0, $p['guests'] ?? 0);
+            $rows[] = [
+                'cur_date'  => $cd,
+                'prev_date' => $pd,
+                // 星期几：两期等长时这两列必然相同，一眼就能看出对齐没错位
+                'cur_dow'   => $cd !== null ? self::dow($cd) : '',
+                'prev_dow'  => $pd !== null ? self::dow($pd) : '',
+                'cur_amt'   => $c['actual'] ?? null,
+                'prev_amt'  => $p['actual'] ?? null,
+                'amt_diff'  => $cd !== null && $pd !== null ? $dAmt : null,
+                'amt_rate'  => $cd !== null && $pd !== null ? $rAmt : null,
+                'cur_gue'   => $c['guests'] ?? null,
+                'prev_gue'  => $p['guests'] ?? null,
+                'gue_diff'  => $cd !== null && $pd !== null ? $dGue : null,
+                'gue_rate'  => $cd !== null && $pd !== null ? $rGue : null,
+                'paired'    => $cd !== null && $pd !== null,
+                'same_dow'  => $cd !== null && $pd !== null && self::dow($cd) === self::dow($pd),
+            ];
+        }
+        return $rows;
+    }
+
+    private const DOW = ['日', '一', '二', '三', '四', '五', '六'];
+
+    /** 星期几（周一…周日） */
+    public static function dow(string $date): string
+    {
+        $t = strtotime($date);
+        return $t === false ? '' : ('周' . self::DOW[(int) date('w', $t)]);
+    }
+
+    /**
+     * 菜品／岗位这类「按名目对比」的通用逻辑。
+     *
+     * @param array  $cur   本期 [key => ['name'=>..,'qty'=>..,'amount'=>..]]
+     * @param array  $prev  上期，结构相同
+     * @param string $by    排序依据：qty 或 amount
+     * @return array 每行 [key,name,cur,prev,diff,rate]，按变化幅度降序（升得最多的在前）
+     */
+    public static function compareItems(array $cur, array $prev, string $by = 'qty'): array
+    {
+        $keys = array_unique(array_merge(array_keys($cur), array_keys($prev)));
+        $rows = [];
+        foreach ($keys as $k) {
+            $c = $cur[$k][$by]  ?? 0;
+            $p = $prev[$k][$by] ?? 0;
+            if (abs((float) $c) < 0.00001 && abs((float) $p) < 0.00001) {
+                continue;                       // 两期都没动静，不占版面
+            }
+            [$d, $r] = self::delta($c, $p);
+            $rows[] = [
+                'key'  => $k,
+                // 本期没有的菜（下架了）名字要从上期取，否则会显示成空白
+                'name' => $cur[$k]['name'] ?? $prev[$k]['name'] ?? ('#' . $k),
+                'pc_name' => $cur[$k]['pc_name'] ?? $prev[$k]['pc_name'] ?? '',
+                'cur'  => (float) $c,
+                'prev' => (float) $p,
+                'diff' => $d,
+                'rate' => $r,
+                // 金额一并带出来：排序按份数/单量，但表格里还要显示金额
+                'cur_amt'  => (float) ($cur[$k]['amount'] ?? 0),
+                'prev_amt' => (float) ($prev[$k]['amount'] ?? 0),
+            ];
+        }
+        usort($rows, static function ($a, $b) {
+            $cmp = $b['diff'] <=> $a['diff'];
+            return $cmp !== 0 ? $cmp : strcmp((string) $a['name'], (string) $b['name']);
+        });
+        return $rows;
+    }
+
+    /** 把 buildDishes 的结果压成 compareItems 要的形状 */
+    public static function flattenDishes(array $items, string $seg = 'total'): array
+    {
+        $out = [];
+        foreach ($items as $id => $it) {
+            $out[$id] = [
+                'name'    => $it['name'],
+                'pc_name' => $it['pc_name'],
+                'qty'     => $it[$seg]['qty'],
+                'amount'  => $it[$seg]['amount'],
+            ];
+        }
+        return $out;
+    }
+
+    /** 把 buildStations 的结果压成 compareItems 要的形状 */
+    public static function flattenStations(array $stations, string $seg = 'total'): array
+    {
+        $out = [];
+        foreach ($stations as $st) {
+            $out[$st['pc']] = [
+                'name'   => $st['pc_name'],
+                'qty'    => $st[$seg]['orders'],      // 岗位比的是「单量」
+                'amount' => $st[$seg]['amount'],
+                'items'  => $st[$seg]['qty'],
+            ];
+        }
+        return $out;
+    }
+
     /** 岗位单量统计的空单元 */
     private static function zeroStation(): array
     {
