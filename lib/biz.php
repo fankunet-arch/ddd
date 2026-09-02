@@ -58,6 +58,61 @@ final class Biz
         return [$from, $to];
     }
 
+    /**
+     * 「今天往前 N 天」的区间（含今天）。
+     *
+     * 今天 = 按营业日算的今天：凌晨 2 点前仍算前一天，所以夜里 1 点打开页面
+     * 看到的「今天」是刚过去的那一场，而不是刚开始的新一天。
+     *
+     * @return array [起始日, 结束日]，都是 Y-m-d
+     */
+    public static function lastDays(int $n, ?string $today = null): array
+    {
+        $n = max(1, $n);
+        $today = $today ?? date('Y-m-d', time() - (int) Db::config()['day_cut_hour'] * 3600);
+        $start = date('Y-m-d', strtotime($today . ' -' . ($n - 1) . ' day'));
+        return [$start, $today];
+    }
+
+    /**
+     * 紧挨着给定区间之前、等长的那一段。
+     *
+     * 用于「本期 vs 上期」：本期 7 天，上期就是再往前数的 7 天，两段首尾相接不重叠。
+     * 因为长度相同，星期几自然对齐 —— 今天周三、本期从上周四起，
+     * 上期就是上上周四到上周三，周四对周四、周三对周三。
+     *
+     * @return array [起始日, 结束日]
+     */
+    public static function prevRange(string $start, string $end): array
+    {
+        $days = self::rangeDays($start, $end);
+        $pEnd   = date('Y-m-d', strtotime($start . ' -1 day'));
+        $pStart = date('Y-m-d', strtotime($pEnd . ' -' . ($days - 1) . ' day'));
+        return [$pStart, $pEnd];
+    }
+
+    /** 区间天数（含首尾） */
+    public static function rangeDays(string $start, string $end): int
+    {
+        $s = strtotime($start);
+        $e = strtotime($end);
+        if ($s === false || $e === false) {
+            return 0;
+        }
+        return (int) round(($e - $s) / 86400) + 1;
+    }
+
+    /** 把营业日列成数组，用于逐日对照 */
+    public static function dateList(string $start, string $end): array
+    {
+        $out = [];
+        $days = self::rangeDays($start, $end);
+        for ($i = 0; $i < $days; $i++) {
+            $out[] = date('Y-m-d', strtotime($start . ' +' . $i . ' day'));
+        }
+        return $out;
+    }
+
     /** 校验日期范围合法性，返回错误信息；合法返回 null */
     public static function validateRange(string $startDate, string $endDate): ?string
     {
