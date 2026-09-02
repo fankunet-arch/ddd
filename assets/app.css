@@ -136,15 +136,30 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
 .periods .pprev{color:var(--dim)}
 .periods .vs{color:var(--dim2);font-size:12px;border:1px solid var(--line);
   border-radius:20px;padding:2px 10px;white-space:nowrap}
-/* 涨跌：绿升红降。餐饮场景里"跌"才是要处理的，所以红色更重一点 */
-.trend{white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:600}
-.trend.up{color:var(--ok)}
-.trend.down{color:var(--err)}
-.trend.flat{color:var(--dim2);font-weight:400}
-.trend em{font-style:normal;font-weight:400;font-size:.9em;opacity:.85}
+/* 涨跌配色：默认【绿涨红跌】。
+   本程序里红色自始至终表示「要处理的事」（未打套餐、酒水不足、开台超时、
+   错误提示），涨也用红的话，同一个红在同一页里就有了两种相反含义。
+   不只靠颜色：PHP 那边还输出了 ▲ / ▼ 和正负号，色觉障碍或样式没加载时照样读得懂。
+   习惯股市红涨绿跌的，在 config 里把 trend_red_up 设成 true，
+   会给元素加上 .ru 类，只翻转颜色、不动箭头。 */
+.trend{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;
+  font-variant-numeric:tabular-nums;font-weight:600;
+  /* 用绝对字号：这个徽章会出现在 13.5px 的表格和 12.5px 的卡片里，
+     写成 em 会层层相乘，小屏上缩到 11.3px，看不清 */
+  padding:2px 8px;border-radius:20px;font-size:12.5px;line-height:1.5}
+.trend.up{color:#1a7a4d;background:#e7f6ef}
+.trend.down{color:#b03a30;background:#fdecea}
+.trend.flat{color:var(--dim2);background:#f0f2f6;font-weight:400}
+.trend em{font-style:normal;font-weight:400;font-size:12px;opacity:.8}
+/* 红涨绿跌（股市习惯）：只换颜色，箭头方向不变 */
+.trend.up.ru{color:#b03a30;background:#fdecea}
+.trend.down.ru{color:#1a7a4d;background:#e7f6ef}
+
 .cards.cmp .card dl{grid-template-columns:auto 1fr}
-.cards.cmp .card.good{border-top-color:var(--ok)}
-.cards.cmp .card.bad{border-top-color:var(--err)}
+.cards.cmp .card.t-up{border-top-color:var(--ok)}
+.cards.cmp .card.t-down{border-top-color:var(--err)}
+.cards.cmp .card.t-up.ru{border-top-color:var(--err)}
+.cards.cmp .card.t-down.ru{border-top-color:var(--ok)}
 
 /* ---------- 表格 ---------- */
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;background:var(--panel);

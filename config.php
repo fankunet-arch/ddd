@@ -94,6 +94,9 @@ return [
     // 'open_table_warn_hours' => 4,  // 开台超过几小时标红
     // 'ack_hours'             => 6,  // 人工确认保留多久
 
+    // 对比页涨跌配色：默认绿涨红跌；想要股市那套红涨绿跌就改成 true
+    // 'trend_red_up' => true,
+
     // 底层驱动 'auto' | 'pdo' | 'mysqli'，默认 auto（自动挑可用的）
     // 'driver' => 'mysqli',
 ];
