@@ -316,7 +316,9 @@ $counts = [
     ['order_head_id' => 5, 'combo_qty' => 1, 'dish_qty' => 3,  'lines_cnt' => 3],
     ['order_head_id' => 6, 'combo_qty' => 2, 'dish_qty' => 6,  'lines_cnt' => 5],
 ];
-$ot = Report::buildOpenTables($heads, $counts, 4);
+// 这一段专测套餐口径，酒水核对先关掉（min_drink = 0），下面【2e3】单独测
+$NODRINK = ['min_drink' => 0];
+$ot = Report::buildOpenTables($heads, $counts, 4, [], [], $NODRINK);
 $by = [];
 foreach ($ot['rows'] as $r) { $by[$r['id']] = $r; }
 
@@ -344,7 +346,7 @@ ok('滞留与份数问题互相独立', $by[6]['stale'] && $by[6]['state'] === R
 eq('滞留台数', $ot['sum']['stale'], 1);
 
 // 明细表里完全没有记录的订单（刚开台还没下单）也要出现，且算作未打套餐
-$ot2 = Report::buildOpenTables([$heads[0]], []);
+$ot2 = Report::buildOpenTables([$heads[0]], [], 4, [], [], $NODRINK);
 eq('无任何明细的台仍会列出', count($ot2['rows']), 1);
 eq('无明细 → 套餐份数 0', $ot2['rows'][0]['combo'], 0.0);
 eq('无明细 → 判为未打套餐', $ot2['rows'][0]['state'], Report::OPEN_NONE);
@@ -443,7 +445,7 @@ ok('两条规则都空时不跳过',   !Report::skipsComboCheck('Llevar', 3, [])
 
 // ---- 接入核对结果 ----
 $skipRules = ['tables' => ['Llevar*'], 'eat_types' => []];
-$otSkip = Report::buildOpenTables($heads, $counts, 4, [], $skipRules);
+$otSkip = Report::buildOpenTables($heads, $counts, 4, [], $skipRules, $NODRINK);
 $bySkip = [];
 foreach ($otSkip['rows'] as $r) { $bySkip[$r['id']] = $r; }
 
@@ -464,18 +466,162 @@ eq('免核对的台排在最末', end($skipSorted)['state'], Report::OPEN_SKIP);
 
 // 免核对的台不接受人工确认（就算会话里留着旧记录也不认）
 $otSkipAck = Report::buildOpenTables($heads, $counts, 4,
-    [5 => ['fp' => $bySkip[5]['fp'], 'at' => time()]], $skipRules);
+    [5 => ['fp' => $bySkip[5]['fp'], 'at' => time()]], $skipRules, $NODRINK);
 $ackedSkip = null;
 foreach ($otSkipAck['rows'] as $r) { if ($r['id'] === 5) { $ackedSkip = $r; } }
 ok('免核对的台不显示为已确认', !$ackedSkip['acked']);
 eq('免核对的台不计入已确认数', $otSkipAck['sum']['acked'], 0);
 
 // eat_type 规则同样能生效（5 号单的 eat_type 是 3）
-$otEat = Report::buildOpenTables($heads, $counts, 4, [], ['eat_types' => [3]]);
+$otEat = Report::buildOpenTables($heads, $counts, 4, [], ['eat_types' => [3]], $NODRINK);
 $byEat = [];
 foreach ($otEat['rows'] as $r) { $byEat[$r['id']] = $r; }
 eq('按 eat_type 也能判为免核对', $byEat[5]['state'], Report::OPEN_SKIP);
 eq('按 eat_type 免核对后问题台同样减一', $otEat['sum']['problem'], 3);
+
+// =====================================================================
+echo "\n【2e3】酒水核对：每人至少一份\n";
+// =====================================================================
+
+// ---- 酒水口径：按出品岗位名匹配出菜品清单 ----
+$pcAll = [1 => 'Kitchen', 6 => 'bebidas', 9 => 'Barra', 11 => '热菜', 12 => 'Sushi 1'];
+$menuAll = [
+    431 => ['name' => 'Coca Cola', 'print_class' => 6,  'is_condiment' => false, 'price' => 2.5],
+    432 => ['name' => 'Agua',      'print_class' => 6,  'is_condiment' => false, 'price' => 2.0],
+    433 => ['name' => 'Cerveza',   'print_class' => 9,  'is_condiment' => false, 'price' => 3.0],
+    501 => ['name' => 'Ramen',     'print_class' => 11, 'is_condiment' => false, 'price' => 9.0],
+    502 => ['name' => 'S/Pepino',  'print_class' => 6,  'is_condiment' => true,  'price' => 0.0],
+    777 => ['name' => 'Vino',      'print_class' => 1,  'is_condiment' => false, 'price' => 12.0],
+];
+
+$d = Report::drinkItems($menuAll, $pcAll, ['drink_print_classes' => ['bebidas*', 'bar*']]);
+eq('命中饮料与吧台两个岗位', array_keys($d['classes']), [6, 9]);
+eq('酒水菜品清单', $d['ids'], [431, 432, 433]);
+ok('厨房的菜不算酒水', !in_array(501, $d['ids'], true));
+ok('做法项不算酒水（哪怕挂在饮料岗位下）', !in_array(502, $d['ids'], true));
+
+// 岗位名不匹配 → 一个都不算，页面会提示
+$dNone = Report::drinkItems($menuAll, $pcAll, ['drink_print_classes' => ['不存在的岗位']]);
+eq('岗位没命中时清单为空', $dNone['ids'], []);
+eq('岗位没命中时不报错', $dNone['classes'], []);
+
+// 单独补入 / 剔除
+$dPlus = Report::drinkItems($menuAll, $pcAll,
+    ['drink_print_classes' => ['bebidas*'], 'drink_extra_item_ids' => [777]]);
+ok('额外补入的菜品算酒水', in_array(777, $dPlus['ids'], true));
+eq('补入的菜品单独记账', $dPlus['extra'], [777]);
+$dMinus = Report::drinkItems($menuAll, $pcAll,
+    ['drink_print_classes' => ['bebidas*'], 'drink_exclude_item_ids' => [432]]);
+ok('被剔除的菜品不算酒水', !in_array(432, $dMinus['ids'], true));
+ok('剔除只影响指定的那一个', in_array(431, $dMinus['ids'], true));
+// 剔除优先于补入，避免两边配矛盾时结果不确定
+$dBoth = Report::drinkItems($menuAll, $pcAll, ['drink_print_classes' => [],
+    'drink_extra_item_ids' => [777], 'drink_exclude_item_ids' => [777]]);
+eq('同时补入又剔除时以剔除为准', $dBoth['ids'], []);
+
+// ---- SQL：酒水和套餐在同一条查询里算出来，不额外扫表 ----
+[$dsql] = Biz::buildComboCountSql([7, 8], [1890], [431, 432]);
+ok('酒水份数进了同一条 SQL', strpos($dsql, 'AS drink_qty') !== false);
+ok('酒水金额也一起算', strpos($dsql, 'AS drink_amount') !== false);
+ok('酒水 SQL 仍然只查 order_detail 一张表', substr_count($dsql, 'FROM order_detail') === 1);
+ok('酒水 SQL 未做 JOIN', stripos($dsql, 'join') === false);
+ok('酒水 SQL 通过只读检查', (static function () use ($dsql) {
+    try { Db::assertReadOnly($dsql); return true; } catch (Throwable $e) { return false; }
+})());
+ok('酒水菜品 ID 编进 IN 列表', strpos($dsql, 'IN (431,432) THEN quantity') !== false);
+[$dsql0] = Biz::buildComboCountSql([7], [1890]);
+ok('没配酒水清单时该项恒为 0', strpos($dsql0, '0   AS drink_amount') !== false
+   || strpos($dsql0, '0  AS drink_qty') !== false);
+ok('没配酒水清单时 SQL 仍然合法', (static function () use ($dsql0) {
+    try { Db::assertReadOnly($dsql0); return true; } catch (Throwable $e) { return false; }
+})());
+
+// ---- 逐台判定：够、不够、一份没点 ----
+$dh = static fn($id, $tbl, $g, $et = 0) => [
+    'order_head_id' => $id, 't0' => date('Y-m-d H:i:s', time() - 600), 'guests' => $g,
+    'table_name' => $tbl, 'employee' => 'A', 'amount' => 50.0, 'checks' => 1,
+    'eat_type' => $et, 'status' => 0, 'settled' => 0];
+$dc = static fn($id, $combo, $drink, $amt = 0.0) => [
+    'order_head_id' => $id, 'combo_qty' => $combo, 'drink_qty' => $drink,
+    'drink_amount' => $amt, 'dish_qty' => 8, 'lines_cnt' => 6];
+
+$dHeads = [$dh(1, '1', 2), $dh(2, '2', 2), $dh(3, '3', 2), $dh(4, '4', 2),
+           $dh(5, '5', 0), $dh(6, 'Llevar', 1, 3)];
+$dCnts  = [$dc(1, 2, 2, 5.0),   // 2 人 2 杯 → 够
+           $dc(2, 2, 5, 12.5),  // 2 人 5 杯 → 够（多了不算问题）
+           $dc(3, 2, 1, 2.5),   // 2 人 1 杯 → 不足
+           $dc(4, 2, 0, 0.0),   // 2 人 0 杯 → 未点酒水
+           $dc(5, 0, 0, 0.0),   // 没填人数 → 不判定
+           $dc(6, 0, 0, 0.0)];  // 外带 → 不判定
+$dr = Report::buildOpenTables($dHeads, $dCnts, 4, [],
+                              ['tables' => ['Llevar*']], ['min_drink' => 1]);
+$dby = [];
+foreach ($dr['rows'] as $r) { $dby[$r['id']] = $r; }
+
+eq('2 人 2 杯 → 够',       $dby[1]['drink_state'], Report::DRINK_OK);
+eq('2 人 5 杯 → 也算够',   $dby[2]['drink_state'], Report::DRINK_OK);
+eq('2 人 1 杯 → 不足',     $dby[3]['drink_state'], Report::DRINK_SHORT);
+eq('2 人 0 杯 → 未点酒水', $dby[4]['drink_state'], Report::DRINK_NONE);
+eq('没填人数 → 不判定酒水', $dby[5]['drink_state'], Report::DRINK_NA);
+eq('免核对的台 → 不判定酒水', $dby[6]['drink_state'], Report::DRINK_NA);
+eq('还差几份（1 杯 vs 2 人）', $dby[3]['drink_short'], 1.0);
+eq('够了就不欠', $dby[2]['drink_short'], 0.0);
+eq('要求份数 = 人数 × 每人份数', $dby[1]['drink_need'], 2.0);
+
+ok('套餐一致但酒水不足，仍算需要核对', $dby[3]['state'] === Report::OPEN_OK && $dby[3]['bad']);
+ok('套餐一致且酒水够，才算没问题', $dby[1]['state'] === Report::OPEN_OK && !$dby[1]['bad']);
+eq('待处理台数（3 号不足 + 4 号没点 + 5 号没填人数）', $dr['sum']['problem'], 3);
+eq('其中酒水不足的', $dr['sum']['drink_problem'], 2);
+eq('其中套餐有问题的（5 号没填人数）', $dr['sum']['combo_problem'], 1);
+eq('酒水份数合计', $dr['sum']['drink'], 2 + 5 + 1);
+eq('酒水金额合计', $dr['sum']['drink_amount'], 5.0 + 12.5 + 2.5);
+
+// 每人两份：门槛跟着抬高
+$dr2 = Report::buildOpenTables($dHeads, $dCnts, 4, [], [], ['min_drink' => 2]);
+$dby2 = [];
+foreach ($dr2['rows'] as $r) { $dby2[$r['id']] = $r; }
+eq('每人两份时 2 人 2 杯不够', $dby2[1]['drink_state'], Report::DRINK_SHORT);
+eq('每人两份时 2 人 5 杯仍然够', $dby2[2]['drink_state'], Report::DRINK_OK);
+eq('每人两份时还差 2 份', $dby2[1]['drink_short'], 2.0);
+
+// 关掉酒水核对：只统计，不判定
+$dr0 = Report::buildOpenTables($dHeads, $dCnts, 4, [], [], ['min_drink' => 0]);
+$dby0 = [];
+foreach ($dr0['rows'] as $r) { $dby0[$r['id']] = $r; }
+eq('关掉后不判定酒水', $dby0[4]['drink_state'], Report::DRINK_NA);
+ok('关掉后 0 杯也不算问题', !$dby0[4]['bad']);
+eq('关掉后酒水仍然照常统计', $dr0['sum']['drink'], 8.0);
+eq('关掉后没有酒水问题台', $dr0['sum']['drink_problem'], 0);
+
+// 明细里没有酒水字段（老数据/桩数据）也不能炸
+$dNo = Report::buildOpenTables([$dh(9, '9', 2)],
+    [['order_head_id' => 9, 'combo_qty' => 2, 'dish_qty' => 3, 'lines_cnt' => 3]], 4);
+eq('缺 drink_qty 字段时按 0 处理', $dNo['rows'][0]['drink'], 0.0);
+eq('缺字段时判为未点酒水', $dNo['rows'][0]['drink_state'], Report::DRINK_NONE);
+
+// 排序：套餐问题 > 只有酒水不足 > 已确认 > 全合格
+$sHeads = [$dh(1, 'A', 2), $dh(2, 'B', 2), $dh(3, 'C', 2)];
+$sCnts  = [$dc(1, 2, 2),   // 全合格
+           $dc(2, 0, 2),   // 套餐没打
+           $dc(3, 2, 0)];  // 套餐一致，酒水没点
+$sorted3 = array_column(Report::sortOpenTables(
+    Report::buildOpenTables($sHeads, $sCnts, 4, [], [], ['min_drink' => 1])['rows']), 'table');
+eq('排序：套餐问题最前，其次酒水不足，最后全合格', $sorted3, ['B', 'C', 'A']);
+
+// 酒水从不足变成够 → 确认作废；不足时又加一杯（仍不足）→ 确认保留
+$aHead = [$dh(1, 'A', 4)];
+$aRow  = Report::buildOpenTables($aHead, [$dc(1, 4, 1)], 4, [], [], ['min_drink' => 1]);
+$aFp   = $aRow['rows'][0]['fp'];
+$aAck  = [1 => ['fp' => $aFp, 'at' => time()]];
+ok('确认后不再计入待处理',
+   Report::buildOpenTables($aHead, [$dc(1, 4, 1)], 4, $aAck, [], ['min_drink' => 1])
+       ['sum']['problem'] === 0);
+ok('酒水仍不足时多点一杯，确认保留',
+   Report::buildOpenTables($aHead, [$dc(1, 4, 2)], 4, $aAck, [], ['min_drink' => 1])
+       ['rows'][0]['acked']);
+ok('酒水补齐后确认作废（状态已变）',
+   !Report::buildOpenTables($aHead, [$dc(1, 4, 4)], 4, $aAck, [], ['min_drink' => 1])
+       ['rows'][0]['acked']);
 
 // =====================================================================
 echo "\n【2f2】开台核对的人工确认\n";
@@ -485,20 +631,24 @@ Ack::resetMemory();
 
 // 指纹只认「人数 + 套餐份数」，其他字段变了不影响
 $base = ['guests' => 4, 'combo' => 2.0, 'amount' => 47.8, 'dishes' => 8];
-eq('指纹格式', Ack::fingerprint($base), '4:200');
+eq('指纹格式', Ack::fingerprint($base), '4:200:d0');
 eq('金额变化不影响指纹', Ack::fingerprint($base + []), Ack::fingerprint(array_merge($base, ['amount' => 99.9])));
 eq('菜品数变化不影响指纹', Ack::fingerprint($base), Ack::fingerprint(array_merge($base, ['dishes' => 30])));
 ok('人数变化会改变指纹', Ack::fingerprint($base) !== Ack::fingerprint(array_merge($base, ['guests' => 5])));
 ok('套餐份数变化会改变指纹', Ack::fingerprint($base) !== Ack::fingerprint(array_merge($base, ['combo' => 3.0])));
-eq('小数份数指纹稳定', Ack::fingerprint(['guests' => 2, 'combo' => 1.5]), '2:150');
+eq('小数份数指纹稳定', Ack::fingerprint(['guests' => 2, 'combo' => 1.5]), '2:150:d0');
+ok('酒水达标与否会改变指纹',
+   Ack::fingerprint($base) !== Ack::fingerprint(array_merge($base, ['drink_ok' => true])));
+eq('酒水达标时指纹带 d1',
+   Ack::fingerprint(['guests' => 2, 'combo' => 2, 'drink_ok' => true]), '2:200:d1');
 
 // 存取
-Ack::set(101, '4:200');
-eq('存入后能取到', Ack::all()[101]['fp'] ?? null, '4:200');
+Ack::set(101, '4:200:d0');
+eq('存入后能取到', Ack::all()[101]['fp'] ?? null, '4:200:d0');
 Ack::clear(101);
 eq('撤销后取不到', Ack::all()[101] ?? null, null);
 Ack::set(101, '4:200');
-Ack::set(102, '2:0');
+Ack::set(102, '2:0:d0');
 eq('可存多台', count(Ack::all()), 2);
 Ack::clearAll();
 eq('清空全部', count(Ack::all()), 0);
@@ -511,15 +661,16 @@ $h4 = [['order_head_id' => 7, 't0' => date('Y-m-d H:i:s', time() - 600), 'guests
         'eat_type' => 0, 'status' => 0, 'settled' => 0]];
 $c4 = [['order_head_id' => 7, 'combo_qty' => 0, 'dish_qty' => 3, 'lines_cnt' => 3]];
 
-$noAck = Report::buildOpenTables($h4, $c4, 4);
+$noAck = Report::buildOpenTables($h4, $c4, 4, [], [], $NODRINK);
 eq('未确认时是「未打套餐」', $noAck['rows'][0]['state'], Report::OPEN_NONE);
 eq('未确认时计入待处理', $noAck['sum']['problem'], 1);
 eq('未确认时 acked 为假', $noAck['rows'][0]['acked'], false);
 $fp = $noAck['rows'][0]['fp'];
-eq('行里带出的指纹与 Ack 算的一致', $fp, Ack::fingerprint(['guests' => 8, 'combo' => 0]));
+eq('行里带出的指纹与 Ack 算的一致', $fp,
+   Ack::fingerprint(['guests' => 8, 'combo' => 0, 'drink_ok' => true]));
 
 $acks = [7 => ['fp' => $fp, 'at' => time()]];
-$withAck = Report::buildOpenTables($h4, $c4, 4, $acks);
+$withAck = Report::buildOpenTables($h4, $c4, 4, $acks, [], $NODRINK);
 ok('确认后标记为已确认', $withAck['rows'][0]['acked']);
 eq('确认后不再计入待处理', $withAck['sum']['problem'], 0);
 eq('确认后单独计数', $withAck['sum']['acked'], 1);
@@ -528,24 +679,24 @@ ok('确认时间被带出', $withAck['rows'][0]['acked_at'] > 0);
 
 // 人数变了 → 确认自动作废
 $h5 = $h4; $h5[0]['guests'] = 10;
-$changed = Report::buildOpenTables($h5, $c4, 4, $acks);
+$changed = Report::buildOpenTables($h5, $c4, 4, $acks, [], $NODRINK);
 ok('人数变化后确认作废', !$changed['rows'][0]['acked']);
 eq('作废后重新计入待处理', $changed['sum']['problem'], 1);
 
 // 补打了套餐 → 确认也作废（而且状态本身也变了）
 $c5 = [['order_head_id' => 7, 'combo_qty' => 8, 'dish_qty' => 11, 'lines_cnt' => 11]];
-$fixed = Report::buildOpenTables($h4, $c5, 4, $acks);
+$fixed = Report::buildOpenTables($h4, $c5, 4, $acks, [], $NODRINK);
 ok('补打套餐后确认作废', !$fixed['rows'][0]['acked']);
 eq('补打套餐后状态变为一致', $fixed['rows'][0]['state'], Report::OPEN_OK);
 
 // 指纹对不上的陈旧确认不生效
-$stale = Report::buildOpenTables($h4, $c4, 4, [7 => ['fp' => '999:999', 'at' => time()]]);
+$stale = Report::buildOpenTables($h4, $c4, 4, [7 => ['fp' => '999:999', 'at' => time()]], [], $NODRINK);
 ok('指纹不匹配的确认不生效', !$stale['rows'][0]['acked']);
 
 // 只是金额/菜品变了，确认应当保持
 $c6 = [['order_head_id' => 7, 'combo_qty' => 0, 'dish_qty' => 30, 'lines_cnt' => 25]];
 $h6 = $h4; $h6[0]['amount'] = 300.0;
-$keep = Report::buildOpenTables($h6, $c6, 4, $acks);
+$keep = Report::buildOpenTables($h6, $c6, 4, $acks, [], $NODRINK);
 ok('只是又点了菜，确认仍然有效', $keep['rows'][0]['acked']);
 
 // 排序：待处理 > 已确认 > 正常
@@ -562,7 +713,7 @@ $cs = [
     ['order_head_id' => 2, 'combo_qty' => 0, 'dish_qty' => 1, 'lines_cnt' => 1],  // 未打套餐
     ['order_head_id' => 3, 'combo_qty' => 0, 'dish_qty' => 1, 'lines_cnt' => 1],  // 未打，但已确认
 ];
-$mixed = Report::buildOpenTables($hs, $cs, 4, [3 => ['fp' => '3:0', 'at' => time()]]);
+$mixed = Report::buildOpenTables($hs, $cs, 4, [3 => ['fp' => '3:0:d1', 'at' => time()]], [], $NODRINK);
 $sorted2 = Report::sortOpenTables($mixed['rows']);
 eq('排序：待处理的问题台在最前', $sorted2[0]['table'], 'B');
 eq('排序：已确认的排中间', $sorted2[1]['table'], 'C');
@@ -586,7 +737,7 @@ $sortCnts = [$mkCnt(1, 2), $mkCnt(2, 2), $mkCnt(3, 2),
              $mkCnt(4, 0), $mkCnt(5, 0),
              $mkCnt(6, 2), $mkCnt(7, 2), $mkCnt(8, 2)];
 $sortRes = Report::sortOpenTables(
-    Report::buildOpenTables($sortHeads, $sortCnts, 4)['rows']);
+    Report::buildOpenTables($sortHeads, $sortCnts, 4, [], [], $NODRINK)['rows']);
 $order = array_column($sortRes, 'table');
 
 eq('问题台排最前且按桌号排', array_slice($order, 0, 2), ['7', '51']);
@@ -602,14 +753,14 @@ ok('纯数字桌号排在文字桌号之前',
 
 // 关闭「问题优先」后应当整体按桌号排
 $byTable = array_column(
-    Report::sortOpenTables(Report::buildOpenTables($sortHeads, $sortCnts, 4)['rows'], false),
+    Report::sortOpenTables(Report::buildOpenTables($sortHeads, $sortCnts, 4, [], [], $NODRINK)['rows'], false),
     'table');
 eq('不分组时全部按桌号排', $byTable, ['2', '7', '9', '10', '51', 'A2', 'A10', 'Llevar']);
 
 // 已确认的台也要按桌号排（在问题台之后、正常台之前）
-$ackedAll = [4 => ['fp' => '4:0', 'at' => time()], 5 => ['fp' => '4:0', 'at' => time()]];
+$ackedAll = [4 => ['fp' => '4:0:d1', 'at' => time()], 5 => ['fp' => '4:0:d1', 'at' => time()]];
 $ackOrder = array_column(Report::sortOpenTables(
-    Report::buildOpenTables($sortHeads, $sortCnts, 4, $ackedAll)['rows']), 'table');
+    Report::buildOpenTables($sortHeads, $sortCnts, 4, $ackedAll, [], $NODRINK)['rows']), 'table');
 eq('已确认的台按桌号排在最前那一档之后', array_slice($ackOrder, 0, 2), ['7', '51']);
 
 Ack::resetMemory();
@@ -635,13 +786,23 @@ ok('免核对规则从 config 读取（缺项套默认）',
 ok('页面会提示当前用的是默认值还是 config 里的配置',
    strpos($openSrc, '$skipCustom') !== false);
 ok('免核对规则传给了核对函数',
-   strpos($openSrc, 'Report::buildOpenTables($heads, $counts, $warnHours, Ack::all(), $skipRules)') !== false);
+   strpos($openSrc, 'Report::buildOpenTables($heads, $counts, $warnHours, Ack::all(), $skipRules,') !== false);
 ok('「只看有问题」会滤掉免核对的台',
    strpos($openSrc, "\$r['state'] !== Report::OPEN_SKIP") !== false);
 ok('免核对的台不给确认按钮',
    strpos($openSrc, "\$r['state'] === Report::OPEN_SKIP") !== false);
 ok('服务端拒绝确认免核对的台', strpos($openSrc, '本来就免核对') !== false);
 ok('页面上列出了当前生效的免核对规则', strpos($openSrc, '当前的判定规则') !== false);
+
+// ---- 页面：酒水核对 ----
+ok('酒水口径从 config 读取', strpos($openSrc, 'Report::drinkItems($menuItems, $printClasses, $cfg)') !== false);
+ok('酒水菜品清单传给了明细查询',
+   strpos($openSrc, 'Biz::orderComboCounts($ids, $comboIds, $drinkIds)') !== false);
+ok('每人至少几份来自配置', strpos($openSrc, "drink_min_per_guest") !== false);
+ok('酒水不足的台也能人工确认', strpos($openSrc, "!\$r['bad'] || \$r['state'] === Report::OPEN_SKIP") !== false);
+ok('页面列出酒水口径命中的岗位', strpos($openSrc, '酒水口径') !== false);
+ok('一个岗位都没命中时给出提示', strpos($openSrc, '当前一个岗位都没命中') !== false);
+ok('页面说明多点不算问题', strpos($openSrc, '多了不算问题') !== false);
 
 // =====================================================================
 echo "\n【2e】登录\n";
@@ -712,6 +873,8 @@ ok('有手机紧凑列表规则', strpos($css, '.openlist') !== false);
 ok('紧凑列表默认隐藏（只在手机显示）', strpos($css, '.openlist{display:none') !== false);
 ok('手机上隐藏次要列', strpos($css, '.hide-sm{display:none}') !== false);
 ok('免核对状态有样式', strpos($css, '.state.s-skip') !== false);
+ok('酒水不足状态有样式',
+   strpos($css, '.state.s-dshort') !== false && strpos($css, '.state.s-dnone') !== false);
 ok('免核对的行被压暗', strpos($css, 'li.row-skip') !== false
    && strpos($css, 'tr.row-skip td') !== false);
 ok('登录页适配小屏高度', strpos($css, '100dvh') !== false);

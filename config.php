@@ -85,6 +85,12 @@ return [
     // 'no_combo_tables' => ['Llevar*', '外带*', 'Barra*'],
     // 'no_combo_eat_types' => [3],
 
+    // 算作「酒水」的出品岗位，默认 ['bebidas*', 'bar*', '酒水*', '饮料*']
+    // 'drink_print_classes'     => ['bebidas*'],
+    // 'drink_extra_item_ids'    => [],   // 岗位没覆盖到的酒水，按菜品 ID 补
+    // 'drink_exclude_item_ids'  => [],   // 免费茶水之类，从酒水里剔除
+    // 'drink_min_per_guest'     => 1,    // 每人至少几份酒水；0 = 只统计不核对
+
     // 'open_table_warn_hours' => 4,  // 开台超过几小时标红
     // 'ack_hours'             => 6,  // 人工确认保留多久
 

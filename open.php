@@ -29,6 +29,8 @@ $warnHours  = (int) ($cfg['open_table_warn_hours'] ?? 4);
 // 站点想改就在 config.php 里写同名的键覆盖
 $skipRules  = Report::skipRules($cfg);
 $skipCustom = array_key_exists('no_combo_tables', Db::overrides());
+// 酒水核对：每人至少几份（0 = 只统计不核对）
+$minDrink   = (float) ($cfg['drink_min_per_guest'] ?? 1);
 $onlyOpen   = !isset($_GET['scope']) || q('scope') !== 'all';
 $onlyIssues = qbool('issues');
 // 二次确认：ask=订单号 时，该行原地展开「确定吗？」，避免误点就生效
@@ -38,6 +40,8 @@ $error = null;
 $data  = null;
 $meta  = [];
 $menuItems = [];
+$printClasses = [];
+$drinks = ['ids' => [], 'classes' => [], 'patterns' => [], 'extra' => [], 'excluded' => []];
 
 /** 回到当前视图（保留筛选条件），用于「提交后跳转」避免刷新重复提交 */
 $selfUrl = static function (array $extra = []): string {
@@ -46,7 +50,11 @@ $selfUrl = static function (array $extra = []): string {
 };
 
 try {
-    $menuItems = Biz::menuItems();
+    $menuItems    = Biz::menuItems();
+    $printClasses = Biz::printClasses();
+    // 酒水口径：按出品岗位名匹配出菜品清单，页面底部会列出来
+    $drinks   = Report::drinkItems($menuItems, $printClasses, $cfg);
+    $drinkIds = $drinks['ids'];
 
     $t0    = microtime(true);
     $heads = Biz::openTables($onlyOpen);
@@ -56,13 +64,14 @@ try {
     if ($heads) {
         $ids = array_column($heads, 'order_head_id');
         $t1  = microtime(true);
-        $counts = Biz::orderComboCounts($ids, $comboIds);
+        $counts = Biz::orderComboCounts($ids, $comboIds, $drinkIds);
         $meta['queries'][] = ['order_detail', count($counts), microtime(true) - $t1];
     }
 
     // ---- 处理人工确认 / 撤销（POST + CSRF，提交后跳转回来）----
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        $fresh = Report::buildOpenTables($heads, $counts, $warnHours, [], $skipRules);
+        $fresh = Report::buildOpenTables($heads, $counts, $warnHours, [], $skipRules,
+                                         ['min_drink' => $minDrink]);
         $byId  = [];
         foreach ($fresh['rows'] as $r) {
             $byId[$r['id']] = $r;
@@ -103,7 +112,8 @@ try {
         exit;
     }
 
-    $data = Report::buildOpenTables($heads, $counts, $warnHours, Ack::all(), $skipRules);
+    $data = Report::buildOpenTables($heads, $counts, $warnHours, Ack::all(), $skipRules,
+                                    ['min_drink' => $minDrink]);
 } catch (Throwable $e) {
     $error = '查询失败：' . $e->getMessage();
 }
@@ -162,10 +172,9 @@ pageHeader('开台核对', 'open');
   $S    = $data['sum'];
   $rows = Report::sortOpenTables($data['rows']);
   if ($onlyIssues) {
-      // 已人工确认的、以及外带这类免核对的，都不算「有问题」
+      // 套餐或酒水任一不合格就算「有问题」；已人工确认的、外带这类免核对的不算
       $rows = array_values(array_filter($rows,
-          fn($r) => $r['state'] !== Report::OPEN_OK
-                 && $r['state'] !== Report::OPEN_SKIP && !$r['acked']));
+          fn($r) => $r['bad'] && $r['state'] !== Report::OPEN_SKIP && !$r['acked']));
   }
 ?>
 
@@ -178,9 +187,24 @@ pageHeader('开台核对', 'open');
       <div class="big"><?= qty($S['combo']) ?></div>
       <dl><dt>与人数差额</dt><dd><?= ($S['combo'] - $S['guests'] >= 0 ? '+' : '')
             . qty($S['combo'] - $S['guests']) ?></dd></dl></div>
+    <div class="card gap"><h3>酒水份数合计</h3>
+      <div class="big"><?= qty($S['drink']) ?></div>
+      <dl>
+        <dt>金额</dt><dd><?= money($S['drink_amount']) ?></dd>
+        <?php if ($minDrink > 0): ?>
+          <dt>与人数差额</dt><dd><?= ($S['drink'] - $S['guests'] >= 0 ? '+' : '')
+                . qty($S['drink'] - $S['guests']) ?></dd>
+        <?php endif; ?>
+      </dl></div>
     <div class="card <?= $S['problem'] > 0 ? 'bad' : 'good' ?>"><h3>需要核对的台</h3>
       <div class="big"><?= num($S['problem']) ?></div>
       <dl>
+        <?php if ($S['combo_problem'] > 0): ?>
+          <dt>套餐对不上</dt><dd><?= num($S['combo_problem']) ?></dd>
+        <?php endif; ?>
+        <?php if ($S['drink_problem'] > 0): ?>
+          <dt>酒水不足</dt><dd><?= num($S['drink_problem']) ?></dd>
+        <?php endif; ?>
         <?php if ($S['acked'] > 0): ?>
           <dt>已人工确认</dt><dd><?= num($S['acked']) ?></dd>
         <?php endif; ?>
@@ -196,7 +220,7 @@ pageHeader('开台核对', 'open');
 
   <?php if (!$rows): ?>
     <p class="empty">
-      <?= $onlyIssues ? '所有台的人数与套餐份数都对得上。' :
+      <?= $onlyIssues ? '所有台的套餐份数与酒水都对得上。' :
           ($onlyOpen ? '当前没有未结算的开台记录。' : '实时表里没有订单记录。') ?>
     </p>
   <?php else: ?>
@@ -205,16 +229,24 @@ pageHeader('开台核对', 'open');
   <?php
   // 每行要显示的内容只算一次，桌面表格与手机列表共用，避免两处口径跑偏
   $fmt = static function (array $r): array {
+      // 底色：套餐缺失最重（红），打多了/没填人数是提醒（黄），
+      // 套餐没问题但酒水不足也按提醒标出来
+      $cls = ['ok' => '', 'short' => 'row-bad', 'none' => 'row-bad',
+              'over' => 'row-warn', 'noguest' => 'row-warn',
+              'skip' => 'row-skip'][$r['state']] ?? '';
+      if ($cls === '' && $r['bad']) {
+          $cls = 'row-warn';
+      }
       return [
-          'cls'   => ['ok' => '', 'short' => 'row-bad', 'none' => 'row-bad',
-                      'over' => 'row-warn', 'noguest' => 'row-warn',
-                      'skip' => 'row-skip'][$r['state']] ?? '',
+          'cls'   => $cls,
           'table' => $r['table'] !== '' ? $r['table'] : '#' . $r['id'],
           'dur'   => $r['minutes'] === null ? '—'
                      : intdiv($r['minutes'], 60) . ':' . str_pad((string) ($r['minutes'] % 60), 2, '0', STR_PAD_LEFT),
           // 免核对的台不做人数/套餐比对，差额没有意义，一律显示 —
           'diff'  => ($r['guests'] > 0 && empty($r['skip']))
                      ? (($r['diff'] > 0 ? '+' : '') . qty($r['diff'])) : '—',
+          // 酒水还差几份，只在不达标时显示
+          'dshort' => $r['drink_short'] > 0.001 ? ('缺 ' . qty($r['drink_short'])) : '',
       ];
   };
   ?>
@@ -231,8 +263,8 @@ pageHeader('开台核对', 'open');
                . '<input type="hidden" name="act" value="unack">'
                . '<button class="btn-mini" type="submit">撤销</button></form>';
       }
-      if ($r['state'] === Report::OPEN_OK || $r['state'] === Report::OPEN_SKIP) {
-          return '';                       // 一致的、免核对的，都没什么可确认的
+      if (!$r['bad'] || $r['state'] === Report::OPEN_SKIP) {
+          return '';                       // 全都合格的、免核对的，没什么可确认的
       }
       if ($askId === $r['id']) {
           return '<form method="post" class="ackform asking">' . $csrf
@@ -257,8 +289,18 @@ pageHeader('开台核对', 'open');
           <?php if ($r['acked']): ?>
             <span class="state s-ack">已确认</span>
             <span class="tag"><?= h(Report::openStateLabel($r['state'])) ?></span>
+            <?php if ($r['drink_state'] !== Report::DRINK_OK
+                   && $r['drink_state'] !== Report::DRINK_NA): ?>
+              <span class="tag"><?= h(Report::drinkStateLabel($r['drink_state'])) ?></span>
+            <?php endif; ?>
           <?php else: ?>
             <span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span>
+            <?php // 酒水达标就不出徽章了，免得每台都挂两个标签 ?>
+            <?php if ($r['drink_state'] === Report::DRINK_SHORT
+                   || $r['drink_state'] === Report::DRINK_NONE): ?>
+              <span class="state s-d<?= h($r['drink_state']) ?>"><?=
+                h(Report::drinkStateLabel($r['drink_state'])) ?></span>
+            <?php endif; ?>
           <?php endif; ?>
         </div>
         <div class="l2">
@@ -272,6 +314,9 @@ pageHeader('开台核对', 'open');
           <?php if ($r['guests'] > 0 && empty($r['skip']) && abs($r['diff']) > 0.001): ?>
             <span class="d <?= $r['state'] === Report::OPEN_OVER ? 'over' : '' ?>"><?= h($f['diff']) ?></span>
           <?php endif; ?>
+          <span>酒水 <b><?= qty($r['drink']) ?></b><?php
+            if ($f['dshort'] !== ''): ?> <span class="d"><?= h($f['dshort']) ?></span><?php
+            endif; ?></span>
           <span class="t <?= $r['stale'] ? 'stale' : '' ?>"><?= h($f['dur']) ?></span>
         </div>
         <div class="l3">
@@ -291,6 +336,7 @@ pageHeader('开台核对', 'open');
   <table class="grid stick">
     <thead><tr>
       <th>桌号</th><th class="n">人数</th><th class="n">套餐份数</th><th class="n">差额</th>
+      <th class="n">酒水</th><th class="n hide-sm">酒水金额</th>
       <th>核对结果</th><th class="n">已点菜品</th><th class="n">当前金额</th>
       <th>开台时间</th><th class="n">已开台</th><th>服务员</th>
       <?php if (!$onlyOpen): ?><th>是否已结算</th><?php endif; ?>
@@ -305,11 +351,24 @@ pageHeader('开台核对', 'open');
         <td class="n strong"><?= $r['guests'] > 0 ? num($r['guests']) : '—' ?></td>
         <td class="n strong"><?= (!empty($r['skip']) && $r['combo'] <= 0) ? '—' : qty($r['combo']) ?></td>
         <td class="n"><?= h($f['diff']) ?></td>
+        <td class="n strong"><?= qty($r['drink']) ?><?php
+            if ($f['dshort'] !== ''): ?> <span class="d"><?= h($f['dshort']) ?></span><?php
+            endif; ?></td>
+        <td class="n hide-sm dim"><?= $r['drink'] > 0 ? money($r['drink_amount']) : '—' ?></td>
         <td><?php if ($r['acked']): ?>
               <span class="state s-ack">已确认</span>
               <span class="tag"><?= h(Report::openStateLabel($r['state'])) ?></span>
+              <?php if ($r['drink_state'] !== Report::DRINK_OK
+                     && $r['drink_state'] !== Report::DRINK_NA): ?>
+                <span class="tag"><?= h(Report::drinkStateLabel($r['drink_state'])) ?></span>
+              <?php endif; ?>
             <?php else: ?>
               <span class="state s-<?= h($r['state']) ?>"><?= h(Report::openStateLabel($r['state'])) ?></span>
+              <?php if ($r['drink_state'] === Report::DRINK_SHORT
+                     || $r['drink_state'] === Report::DRINK_NONE): ?>
+                <span class="state s-d<?= h($r['drink_state']) ?>"><?=
+                  h(Report::drinkStateLabel($r['drink_state'])) ?></span>
+              <?php endif; ?>
             <?php endif; ?></td>
         <td class="n"><?= qty($r['dishes']) ?> <span class="dim">/ <?= num($r['lines']) ?> 笔</span></td>
         <td class="n"><?= money($r['amount']) ?></td>
@@ -332,14 +391,45 @@ pageHeader('开台核对', 'open');
     <span class="state s-short">套餐打少了</span> 份数比人数少。
     <span class="state s-over">套餐打多了</span> 份数比人数多。
     <span class="state s-noguest">未填人数</span> 开台时没填人数，无法比对。
+    <span class="state s-dnone">未点酒水</span>
+    <span class="state s-dshort">酒水不足</span>
+    <?php if ($minDrink > 0): ?>
+      规则是<strong>每人至少 <?= qty($minDrink) ?> 份，多了不算问题</strong> ——
+      2 位客人点 2 份就算达标，点 3 份、5 份都行，只点 1 份才提示。
+    <?php else: ?>
+      （当前只统计酒水杯数，不做核对；要开启就在 config.php 里设
+      <code>drink_min_per_guest</code>）
+    <?php endif; ?>
     <span class="state s-skip">免核对</span> 外带（Llevar）这类台没有堂食人数、也不会点按人头的
     自助套餐，不参与核对，也不计入「需要核对的台」。
     <br>
     只点单品不吃自助的客人，本来就不会有套餐 —— 这类会显示成「未打套餐」，属正常，
     请结合金额与菜品数判断。「已开台」按 时:分 显示，超过 <?= (int) $warnHours ?> 小时会标红。
     <br>
-    排序：<strong>需要核对的台在最前，其次是已人工确认的，然后是一致的，免核对的排最后</strong>；
+    排序：<strong>套餐有问题的最前，其次是只有酒水不足的，然后是已人工确认的、
+    全都合格的，免核对的排最后</strong>；
     每一档内部按桌号排（2 排在 10 前面，纯数字桌号排在文字桌号之前）。
+  </p>
+  <p class="note">
+    <strong>酒水口径</strong>：按出品岗位判定，不是一个个列菜品 ——
+    <?php if ($drinks['classes']): ?>
+      当前命中
+      <?php foreach ($drinks['classes'] as $pc => $nm): ?><span class="tag"><?= h($nm) ?></span><?php endforeach; ?>
+      共 <strong><?= num(count($drinks['ids'])) ?></strong> 个菜品。
+    <?php else: ?>
+      <strong class="errtext">当前一个岗位都没命中，酒水会全部显示为 0。</strong>
+      本店的岗位名是：<?= h(implode('、', array_slice(array_values($printClasses), 0, 20))) ?>；
+      请把对应的岗位名填进 config.php 的 <code>drink_print_classes</code>。
+    <?php endif; ?>
+    规则 <?= h(implode('、', $drinks['patterns'])) ?: '（空）' ?>
+    （大小写不敏感，<code>*</code> 是通配符）。
+    <?php if ($drinks['extra']): ?>
+      另外单独补入 <?= num(count($drinks['extra'])) ?> 个菜品。
+    <?php endif; ?>
+    <?php if ($drinks['excluded']): ?>
+      剔除 <?= num(count($drinks['excluded'])) ?> 个菜品（免费茶水之类）。
+    <?php endif; ?>
+    换季加了新饮料不用改清单，只要它挂在这些岗位下就会自动算进来。
   </p>
   <p class="note">
     <span class="state s-skip">免核对</span> 当前的判定规则：
@@ -367,8 +457,9 @@ pageHeader('开台核对', 'open');
     <br>
     确认只记在<strong>当前登录会话</strong>里（不写数据库，本程序始终只读），
     <?= (int) Ack::hours() ?> 小时后自动失效，退出登录即清空，换一台设备也要重新确认。
-    <strong>该台的人数或套餐份数一旦变化，确认自动作废</strong>，会重新回到待核对状态 ——
-    所以补打了套餐、加了人，都不会被旧的确认盖住。
+    <strong>该台的人数、套餐份数、或酒水够不够，任一项变化，确认自动作废</strong>，
+    会重新回到待核对状态 —— 所以补打了套餐、加了人，都不会被旧的确认盖住。
+    酒水只看「够没够」不看杯数，所以不足时又加一杯（仍然不足）不会让确认作废。
   </p>
 
   <?php endif; ?>

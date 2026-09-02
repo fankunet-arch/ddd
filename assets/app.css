@@ -212,6 +212,12 @@ table.rank .bar.bottom{background:linear-gradient(90deg,#edc48a,#dd9440)}
 .state.s-over{background:#fff3e0;color:#96600f}
 .state.s-noguest{background:#eef1f6;color:var(--dim)}
 .state.s-skip{background:#eef1f6;color:var(--dim)}
+/* 酒水核对：不足是提醒（橙），一份没点更明显一些 */
+.state.s-dshort{background:#fff3e0;color:#96600f}
+.state.s-dnone{background:#fff3e0;color:#96600f;font-weight:650}
+.openlist .l2 span .d{margin-left:4px}
+table.grid td .d{color:var(--err);font-weight:650;margin-left:4px;font-size:12.5px}
+.errtext{color:var(--err)}
 /* 外带这类免核对的台压暗，别抢走要处理的台的注意力 */
 .openlist li.row-skip{opacity:.72}
 table.grid tr.row-skip td{color:var(--dim)}
