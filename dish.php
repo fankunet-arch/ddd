@@ -349,7 +349,10 @@ pageHeader('菜品点单统计', 'dish');
 <?php endif; ?>
 
 <script>
-window.MENU_ITEMS = <?= json_encode($pickList, JSON_UNESCAPED_UNICODE) ?>;
+// 菜名来自数据库（店员随手填的），内嵌进 <script> 时必须把 < > & ' " 转成 \uXXXX：
+// json_encode 默认只转义 /，菜名里的 <script> 会原样落进来，离「被标签截断」只差一步。
+window.MENU_ITEMS = <?= json_encode($pickList, JSON_UNESCAPED_UNICODE
+    | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 </script>
 <script src="assets/app.js"></script>
 

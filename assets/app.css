@@ -211,12 +211,43 @@ table.rank .bar.bottom{background:linear-gradient(90deg,#edc48a,#dd9440)}
 .state.s-none{background:#fdecea;color:#a8342c;font-weight:650}
 .state.s-over{background:#fff3e0;color:#96600f}
 .state.s-noguest{background:#eef1f6;color:var(--dim)}
+.state.s-skip{background:#eef1f6;color:var(--dim)}
+/* 酒水核对：不足是提醒（橙），一份没点更明显一些 */
+.state.s-dshort{background:#fff3e0;color:#96600f}
+.state.s-dnone{background:#fff3e0;color:#96600f;font-weight:650}
+.openlist .l2 span .d{margin-left:4px}
+table.grid td .d{color:var(--err);font-weight:650;margin-left:4px;font-size:12.5px}
+.errtext{color:var(--err)}
+/* 外带这类免核对的台压暗，别抢走要处理的台的注意力 */
+.openlist li.row-skip{opacity:.72}
+table.grid tr.row-skip td{color:var(--dim)}
 table.grid tr.row-bad td{background:#fef8f7}
 table.grid tr.row-bad:hover td{background:#fdefed}
 table.grid tr.row-warn td{background:#fffcf5}
 table.grid tr.row-warn:hover td{background:#fff6e9}
 table.grid .stale{color:var(--err);font-weight:650}
 .note .state{margin:0 2px}
+
+/* ---------- 人工确认 ---------- */
+.state.s-ack{background:#eaeef6;color:#55617a}
+.btn-mini{display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);background:#fff;color:var(--dim);border-radius:6px;
+  padding:0 12px;height:32px;font-size:13px;cursor:pointer;font-family:inherit;
+  white-space:nowrap}
+.btn-mini:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
+.btn-mini.yes{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500}
+.btn-mini.yes:hover{background:var(--accent-d)}
+.btn-mini.no{color:var(--dim)}
+.ackform{display:inline-flex;align-items:center;gap:6px;margin:0}
+.ackform.asking .asktip{font-size:13px;color:var(--err);font-weight:600}
+tr.acked td{opacity:.72}
+tr.acked td .state,tr.acked td .btn-mini{opacity:1}
+.openlist li.acked{opacity:.78;border-color:var(--line)!important;background:var(--panel)!important}
+.ackcell{white-space:nowrap}
+.clearack{display:flex;align-items:center;gap:12px;margin:-8px 0 16px;
+  font-size:13px;color:var(--dim)}
+.okmsg{background:#e7f6ef;border:1px solid #b9e3ce;color:#1d7a4f;padding:12px 15px;
+  border-radius:var(--radius)}
 
 /* ---------- 登录页 ---------- */
 .loginpage{display:flex;align-items:center;justify-content:center;
@@ -335,6 +366,11 @@ table.grid .stale{color:var(--err);font-weight:650}
   .openlist{display:block}
   .opentable{display:none}
 
+  /* 确认按钮在手机上要够大 */
+  .btn-mini{height:40px;padding:0 16px;font-size:14px}
+  .openlist .l3{display:flex;align-items:center;gap:10px;justify-content:space-between}
+  .openlist .l3 .ackform,.openlist .l3 .btn-mini{flex:none}
+
   .loginbox{padding:28px 22px 24px}
   .empty{padding:26px 16px}
 }
@@ -345,6 +381,7 @@ table.grid .stale{color:var(--err);font-weight:650}
    所以点击目标按「指针精度」判断，而不是按屏幕宽度。
    ============================================================ */
 @media (pointer:coarse){
+  .btn-mini{height:40px;padding:0 16px}
   /* 11px 在手持设备上太小，凡是触屏一律提到 12px */
   table.grid thead th .sub,table.grid .date .wd{font-size:12px}
   .combo-list li .pc,.combo-list li .no{font-size:12px}

@@ -409,29 +409,30 @@ final class Biz
     }
 
     /**
-     * 这些订单各点了多少份套餐、多少菜（实时表 order_detail）。
+     * 这些订单各点了多少份套餐、多少酒水、多少菜（实时表 order_detail）。
      *
-     * 一次查询同时算出套餐份数与全部菜品数 —— 用 SUM(CASE WHEN ...) 区分，
-     * 不需要为套餐单独跑一遍。
+     * 一次查询同时算出套餐份数、酒水份数与全部菜品数 —— 都用 SUM(CASE WHEN ...) 区分，
+     * 不需要为套餐或酒水各跑一遍。多加一个 SUM 不增加扫描量。
      *
      * 注意 order_detail 只有主键、没有 order_head_id 索引，这条查询会全表扫描。
      * 但只扫一次，且实时表通常只装当前未日结的数据，可以接受。
      *
      * @param int[] $orderIds  要查的订单号
      * @param int[] $comboIds  算作「按人头套餐」的菜品 ID
-     * @return array 每行 [order_head_id, combo_qty, dish_qty, lines_cnt]
+     * @param int[] $drinkIds  算作「酒水」的菜品 ID
+     * @return array 每行 [order_head_id, combo_qty, drink_qty, drink_amount, dish_qty, lines_cnt]
      */
-    public static function orderComboCounts(array $orderIds, array $comboIds): array
+    public static function orderComboCounts(array $orderIds, array $comboIds, array $drinkIds = []): array
     {
         if (!$orderIds) {
             return [];
         }
-        [$sql, $params] = self::buildComboCountSql($orderIds, $comboIds);
+        [$sql, $params] = self::buildComboCountSql($orderIds, $comboIds, $drinkIds);
         return Db::select($sql, $params);
     }
 
-    /** 构造套餐份数 SQL。所有 ID 强制转整数后拼接，不可能带入非数字内容。 */
-    public static function buildComboCountSql(array $orderIds, array $comboIds): array
+    /** 构造套餐/酒水份数 SQL。所有 ID 强制转整数后拼接，不可能带入非数字内容。 */
+    public static function buildComboCountSql(array $orderIds, array $comboIds, array $drinkIds = []): array
     {
         $ids = [];
         foreach ($orderIds as $v) {
@@ -443,26 +444,38 @@ final class Biz
         if (!$ids) {
             throw new InvalidArgumentException('订单号清单为空');
         }
-        $idList = implode(',', array_keys($ids));
+        $orderIn = implode(',', array_keys($ids));
 
-        $combo = [];
-        foreach ($comboIds as $v) {
-            $n = (int) $v;
-            if ($n > 0) {
-                $combo[$n] = true;
+        // 菜品 ID 清单编译成 IN 列表；空清单时该项恒为 0，SQL 仍然合法
+        $compile = static function (array $ids): string {
+            $out = [];
+            foreach ($ids as $v) {
+                $n = (int) $v;
+                if ($n > 0) {
+                    $out[$n] = true;
+                }
             }
-        }
-        // 没配套餐清单时套餐份数恒为 0，SQL 仍然合法
-        $comboExpr = $combo
-            ? 'SUM(CASE WHEN menu_item_id IN (' . implode(',', array_keys($combo)) . ') THEN quantity ELSE 0 END)'
-            : '0';
+            return implode(',', array_keys($out));
+        };
+
+        $comboIn = $compile($comboIds);
+        $drinkIn = $compile($drinkIds);
+
+        $comboExpr = $comboIn !== ''
+            ? "SUM(CASE WHEN menu_item_id IN ({$comboIn}) THEN quantity ELSE 0 END)" : '0';
+        $drinkExpr = $drinkIn !== ''
+            ? "SUM(CASE WHEN menu_item_id IN ({$drinkIn}) THEN quantity ELSE 0 END)" : '0';
+        $drinkAmt  = $drinkIn !== ''
+            ? "SUM(CASE WHEN menu_item_id IN ({$drinkIn}) THEN actual_price * quantity ELSE 0 END)" : '0';
 
         $sql = "SELECT order_head_id,
                        {$comboExpr}  AS combo_qty,
+                       {$drinkExpr}  AS drink_qty,
+                       {$drinkAmt}   AS drink_amount,
                        SUM(quantity) AS dish_qty,
                        COUNT(*)      AS lines_cnt
                 FROM order_detail
-                WHERE order_head_id IN ({$idList})
+                WHERE order_head_id IN ({$orderIn})
                   AND menu_item_id > 0
                   AND quantity > 0
                   AND (is_return_item IS NULL OR is_return_item = 0)

@@ -7,6 +7,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/biz.php';
+require_once __DIR__ . '/ack.php';
 
 final class Report
 {
@@ -198,6 +199,173 @@ final class Report
     public const OPEN_OVER    = 'over';     // 套餐打多了
     public const OPEN_NONE    = 'none';     // 一份套餐都没打
     public const OPEN_NOGUEST = 'noguest';  // 没填人数，没法比对
+    public const OPEN_SKIP    = 'skip';     // 外带之类，本来就没有人头套餐，不用核对
+
+    /** 酒水核对：规则是「每人至少 N 份，多了没关系」 */
+    public const DRINK_OK    = 'ok';        // 达标
+    public const DRINK_SHORT = 'short';     // 点了，但不够人头
+    public const DRINK_NONE  = 'none';      // 一份没点
+    public const DRINK_NA    = 'na';        // 不适用：没填人数、免核对台、或没开启这项检查
+
+    public static function drinkStateLabel(string $state): string
+    {
+        return [
+            self::DRINK_OK    => '酒水够',
+            self::DRINK_SHORT => '酒水不足',
+            self::DRINK_NONE  => '未点酒水',
+            self::DRINK_NA    => '不核对酒水',
+        ][$state] ?? $state;
+    }
+
+    /**
+     * 从配置里读出免核对规则，缺项退回 lib/settings.php 的默认值。
+     *
+     * 正常情况下 Db::config() 已经把默认值合进来了，这里的兜底是为了
+     * 直接传进来的裸配置数组（测试、或万一有人绕过 Db 读 config.php）——
+     * 缺项时功能应当照常生效，而不是静默失灵。
+     *
+     * 用 array_key_exists 区分「没写这一项」和「写了但留空」：
+     * 没写 → 套默认；明确写成 [] → 表示「所有台都要核对」，必须尊重。
+     *
+     * @return array ['tables' => 桌号通配符[], 'eat_types' => eat_type 取值[]]
+     */
+    public static function skipRules(array $cfg): array
+    {
+        if (!array_key_exists('no_combo_tables', $cfg)) {
+            // 默认值只有 settings.php 一个出处，避免两边抄一份抄岔了。
+            // 用 require 而不是 require_once —— 后者第二次调用只返回 true。
+            $defaults = (array) require __DIR__ . '/settings.php';
+            $cfg['no_combo_tables'] = $defaults['no_combo_tables'] ?? [];
+        }
+
+        $tables = array_map(static fn($v) => trim((string) $v), (array) $cfg['no_combo_tables']);
+
+        return [
+            'tables'    => array_values(array_filter($tables, static fn($v) => $v !== '')),
+            'eat_types' => array_map('intval', (array) ($cfg['no_combo_eat_types'] ?? [])),
+        ];
+    }
+
+    /**
+     * 名字是否命中任意一条通配符规则。
+     *
+     * 大小写不敏感，支持 * 与 ?（'Llevar*' 能匹配 Llevar、LLEVAR 2、Llevar-03）。
+     * 两端空格先去掉，避免 POS 里手滑多打一个空格就匹配不上。
+     * 整体匹配，不做部分匹配：'Llevar*' 不会命中 'A-Llevar'。
+     */
+    public static function matchesAny(string $name, array $patterns): bool
+    {
+        $name = trim($name);
+        if ($name === '' || !$patterns) {
+            return false;
+        }
+        foreach ($patterns as $p) {
+            $p = trim((string) $p);
+            if ($p === '') {
+                continue;
+            }
+            // preg_quote 会把 * ? 也转义掉，这里再换回通配符语义
+            $re = '/^' . str_replace(['\*', '\?'], ['.*', '.'], preg_quote($p, '/')) . '$/i';
+            if (preg_match($re, $name) === 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 桌号是否属于「不按人头核对」的台 */
+    public static function isNoComboTable(string $table, array $patterns): bool
+    {
+        return self::matchesAny($table, $patterns);
+    }
+
+    // ------------------------------------------------------------------
+    // 酒水口径
+    // ------------------------------------------------------------------
+
+    /**
+     * 算出哪些菜品算「酒水」。
+     *
+     * 按【出品岗位名】匹配而不是列菜品 ID：酒水都从吧台/饮料机出，print_class
+     * 就是现成的分类，换季加饮料也不用回来改清单。再用 drink_extra_item_ids /
+     * drink_exclude_item_ids 做个别补充和剔除。
+     *
+     * 做法/口味项（item_type = 1）不是菜，永远排除。
+     *
+     * @param array $menuItems   Biz::menuItems() 的结果
+     * @param array $printClasses Biz::printClasses() 的结果 pc => name
+     * @return array [
+     *   'ids'      => int[]             算作酒水的菜品 ID
+     *   'classes'  => [pc => name]      命中的岗位
+     *   'patterns' => string[]          生效的岗位名规则
+     *   'extra'    => int[]             额外补进来的菜品 ID（真实存在于菜单的）
+     *   'excluded' => int[]             被剔除的菜品 ID
+     * ]
+     */
+    public static function drinkItems(array $menuItems, array $printClasses, array $cfg): array
+    {
+        $patterns = array_values(array_filter(array_map(
+            static fn($v) => trim((string) $v),
+            (array) ($cfg['drink_print_classes'] ?? [])), static fn($v) => $v !== ''));
+
+        $classes = [];
+        foreach ($printClasses as $pc => $name) {
+            if (self::matchesAny((string) $name, $patterns)) {
+                $classes[(int) $pc] = (string) $name;
+            }
+        }
+
+        $exclude = [];
+        foreach ((array) ($cfg['drink_exclude_item_ids'] ?? []) as $v) {
+            $exclude[(int) $v] = true;
+        }
+
+        $ids = [];
+        foreach ($menuItems as $id => $m) {
+            $id = (int) $id;
+            if ($id <= 0 || !empty($m['is_condiment']) || isset($exclude[$id])) {
+                continue;
+            }
+            $pc = $m['print_class'];
+            if ($pc !== null && isset($classes[(int) $pc])) {
+                $ids[$id] = true;
+            }
+        }
+
+        $extra = [];
+        foreach ((array) ($cfg['drink_extra_item_ids'] ?? []) as $v) {
+            $id = (int) $v;
+            if ($id > 0 && !isset($exclude[$id])) {
+                $ids[$id] = true;
+                if (isset($menuItems[$id])) {
+                    $extra[] = $id;
+                }
+            }
+        }
+
+        ksort($ids);
+        return [
+            'ids'      => array_keys($ids),
+            'classes'  => $classes,
+            'patterns' => $patterns,
+            'extra'    => $extra,
+            'excluded' => array_keys($exclude),
+        ];
+    }
+
+    /**
+     * 这张台要不要跳过「人数 vs 套餐」核对。
+     *
+     * @param array $skip ['tables' => 桌号通配符[], 'eat_types' => eat_type 取值[]]
+     */
+    public static function skipsComboCheck(string $table, int $eatType, array $skip): bool
+    {
+        if (self::isNoComboTable($table, (array) ($skip['tables'] ?? []))) {
+            return true;
+        }
+        $types = array_map('intval', (array) ($skip['eat_types'] ?? []));
+        return $types !== [] && in_array($eatType, $types, true);
+    }
 
     /**
      * 把开台列表和套餐份数合起来，逐桌判断人数与套餐是否对得上。
@@ -205,9 +373,18 @@ final class Report
      * @param array $heads   Biz::openTables() 的结果
      * @param array $counts  Biz::orderComboCounts() 的结果
      * @param int   $warnHours 开台超过几小时算滞留
+     * @param array $acks    人工确认记录 [order_head_id => ['fp'=>..,'at'=>..]]，
+     *                       指纹对不上（人数或套餐份数变了）就当作没确认过
+     * @param array $skip    免核对规则 ['tables'=>[..], 'eat_types'=>[..]]，
+     *                       命中的台（外带等）判为 OPEN_SKIP，不算问题台
+     * @param array $opts    ['min_drink' => 每位客人至少几份酒水，0 = 只统计不核对]
      */
-    public static function buildOpenTables(array $heads, array $counts, int $warnHours = 4): array
+    public static function buildOpenTables(array $heads, array $counts, int $warnHours = 4,
+                                           array $acks = [], array $skip = [],
+                                           array $opts = []): array
     {
+        // 酒水规则：每人至少 min_drink 份，多了没关系。0 表示只统计、不核对。
+        $minDrink = array_key_exists('min_drink', $opts) ? (float) $opts['min_drink'] : 1.0;
         $byId = [];
         foreach ($counts as $c) {
             $byId[(int) $c['order_head_id']] = $c;
@@ -215,19 +392,32 @@ final class Report
 
         $rows = [];
         $sum  = ['tables' => 0, 'guests' => 0, 'combo' => 0.0, 'amount' => 0.0,
-                 'problem' => 0, 'stale' => 0];
+                 'problem' => 0, 'acked' => 0, 'stale' => 0, 'skip' => 0,
+                 'drink' => 0.0, 'drink_amount' => 0.0,
+                 'combo_problem' => 0, 'drink_problem' => 0,
+                 // 出现「开台时间在未来」= PHP 与数据库时钟／时区对不上
+                 'clock_skew' => 0];
         $now  = time();
 
         foreach ($heads as $h) {
             $id     = (int) $h['order_head_id'];
+            $table  = (string) ($h['table_name'] ?? '');
             $guests = (int) $h['guests'];
             $c      = $byId[$id] ?? null;
             $combo  = $c ? (float) $c['combo_qty'] : 0.0;
             $dishes = $c ? (float) $c['dish_qty']  : 0.0;
             $lines  = $c ? (int) $c['lines_cnt']   : 0;
+            $drink  = $c ? (float) ($c['drink_qty'] ?? 0)    : 0.0;
+            $drinkA = $c ? (float) ($c['drink_amount'] ?? 0) : 0.0;
             $diff   = $combo - $guests;
 
-            if ($guests <= 0) {
+            // 外带（Llevar）之类的台没有堂食人数、也不会点按人头的自助套餐，
+            // 拿人数去比对只会一直报「未打套餐」，直接判为免核对。
+            $noCheck = self::skipsComboCheck($table, (int) ($h['eat_type'] ?? 0), $skip);
+
+            if ($noCheck) {
+                $state = self::OPEN_SKIP;
+            } elseif ($guests <= 0) {
                 $state = self::OPEN_NOGUEST;
             } elseif (abs($diff) < 0.001) {
                 $state = self::OPEN_OK;
@@ -239,17 +429,63 @@ final class Report
                 $state = self::OPEN_OVER;
             }
 
+            // 酒水核对：每人至少 min_drink 份，够了就行，多了不管。
+            // 没填人数、免核对的台、或没开启这项检查时不判定。
+            $need = ($minDrink > 0 && $guests > 0 && !$noCheck) ? $guests * $minDrink : 0.0;
+            if ($need <= 0) {
+                $dstate = self::DRINK_NA;
+            } elseif ($drink + 0.001 >= $need) {
+                $dstate = self::DRINK_OK;
+            } elseif ($drink <= 0) {
+                $dstate = self::DRINK_NONE;
+            } else {
+                $dstate = self::DRINK_SHORT;
+            }
+            $drinkShort = max(0.0, $need - $drink);
+
+            // strtotime 解析失败返回 false，要当成「没有时间」而不是 1970 年
             $t0   = $h['t0'] ? strtotime((string) $h['t0']) : null;
-            $mins = $t0 ? (int) floor(($now - $t0) / 60) : null;
-            $stale = $mins !== null && $mins >= $warnHours * 60;
+            $t0   = ($t0 === false) ? null : $t0;
+            $mins = $t0 !== null ? (int) floor(($now - $t0) / 60) : null;
+            // 开台时间在未来 → 本机时钟或时区与数据库对不上，时长没有意义
+            $skew = $mins !== null && $mins < 0;
+            // warnHours <= 0 表示关掉滞留提醒（与 min_drink 的 0 = 不核对一致），
+            // 否则填 0 会把每一张台都标红，等于没提醒
+            $stale = $warnHours > 0 && $mins !== null && !$skew && $mins >= $warnHours * 60;
+
+            // 套餐、酒水任一项不合格，这张台就要人看一眼
+            $comboBad = $state !== self::OPEN_OK && $state !== self::OPEN_SKIP;
+            $drinkBad = $dstate === self::DRINK_SHORT || $dstate === self::DRINK_NONE;
+            $bad      = $comboBad || $drinkBad;
+
+            // 人工确认：只有指纹一致才算数，人数、套餐份数或酒水达标与否一变就自动作废。
+            // 酒水只记「够没够」而不记杯数 —— 不足时又加一杯（仍然不足）不该让确认作废。
+            // 免核对的台本来就没有待确认的事，不显示确认状态。
+            $fp    = Ack::fingerprint([
+                'guests'   => $guests,
+                'combo'    => $combo,
+                'drink_ok' => !$drinkBad,
+            ]);
+            $a     = $acks[$id] ?? null;
+            $acked = !$noCheck && is_array($a) && ($a['fp'] ?? null) === $fp;
 
             $rows[] = [
+                'acked'    => $acked,
+                'acked_at' => $acked ? (int) ($a['at'] ?? 0) : null,
+                'fp'       => $fp,
                 'id'       => $id,
-                'table'    => (string) ($h['table_name'] ?? ''),
+                'table'    => $table,
+                'skip'     => $noCheck,
                 'guests'   => $guests,
                 'combo'    => $combo,
                 'diff'     => $diff,
                 'state'    => $state,
+                'bad'      => $bad,
+                'drink'        => $drink,
+                'drink_amount' => $drinkA,
+                'drink_state'  => $dstate,
+                'drink_need'   => $need,
+                'drink_short'  => $drinkShort,
                 'dishes'   => $dishes,
                 'lines'    => $lines,
                 'amount'   => (float) $h['amount'],
@@ -259,6 +495,7 @@ final class Report
                 'start'    => (string) ($h['t0'] ?? ''),
                 'minutes'  => $mins,
                 'stale'    => $stale,
+                'skew'     => $skew,
                 'employee' => (string) ($h['employee'] ?? ''),
             ];
 
@@ -266,18 +503,37 @@ final class Report
             $sum['guests'] += $guests;
             $sum['combo']  += $combo;
             $sum['amount'] += (float) $h['amount'];
-            if ($state !== self::OPEN_OK) {
-                $sum['problem']++;
+            $sum['drink']        += $drink;
+            $sum['drink_amount'] += $drinkA;
+            // 已人工确认的不再算作待处理，但单独计数，方便看确认了多少台
+            if ($state === self::OPEN_SKIP) {
+                $sum['skip']++;
+            } elseif ($bad) {
+                if ($acked) {
+                    $sum['acked']++;
+                } else {
+                    $sum['problem']++;
+                    // 再按维度拆一下，方便一眼看出是套餐的问题还是酒水的问题
+                    if ($comboBad) {
+                        $sum['combo_problem']++;
+                    }
+                    if ($drinkBad) {
+                        $sum['drink_problem']++;
+                    }
+                }
             }
             if ($stale) {
                 $sum['stale']++;
+            }
+            if ($skew) {
+                $sum['clock_skew']++;
             }
         }
 
         return ['rows' => $rows, 'sum' => $sum];
     }
 
-    /** 问题桌排前面，其次按开台时间；方便一眼看到要处理的 */
+    /** 问题桌排前面，组内按桌号；方便一眼看到要处理的 */
     public static function sortOpenTables(array $rows, bool $problemFirst = true): array
     {
         $rank = [
@@ -287,14 +543,36 @@ final class Report
             self::OPEN_NOGUEST => 3,
             self::OPEN_OK      => 4,
         ];
-        usort($rows, static function ($a, $b) use ($rank, $problemFirst) {
+        // 分档：套餐有问题 → 只有酒水不足 → 已人工确认 → 全都合格 → 免核对
+        $tier = static function (array $r) use ($rank): float {
+            if ($r['state'] === self::OPEN_SKIP) {
+                return 9.0;                       // 外带等，压到最后
+            }
+            if (!empty($r['acked'])) {
+                return 5.0;                       // 确认过的降到问题台之后、正常台之前
+            }
+            if (empty($r['bad'])) {
+                return 6.0;                       // 套餐和酒水都合格
+            }
+            $st = $rank[$r['state']] ?? 4;
+            return $st < 4 ? (float) $st : 4.5;   // 4.5 = 套餐没问题，只是酒水不足
+        };
+
+        usort($rows, static function ($a, $b) use ($tier, $problemFirst) {
             if ($problemFirst) {
-                $cmp = ($rank[$a['state']] ?? 9) <=> ($rank[$b['state']] ?? 9);
-                if ($cmp !== 0) {
-                    return $cmp;
+                $ra = $tier($a);
+                $rb = $tier($b);
+                if ($ra != $rb) {
+                    return $ra <=> $rb;
                 }
             }
-            return strcmp($a['start'], $b['start']);
+            // 组内按桌号排，方便照着桌号找。用自然排序，这样 2 排在 10 前面，
+            // 而不是字符串序把 10 排到 2 前面；纯数字桌号会自动排在文字桌号之前。
+            $cmp = strnatcasecmp($a['table'], $b['table']);
+            if ($cmp !== 0) {
+                return $cmp;
+            }
+            return strcmp($a['start'], $b['start']);   // 桌号相同再按开台时间，保证顺序稳定
         });
         return $rows;
     }
@@ -302,11 +580,12 @@ final class Report
     public static function openStateLabel(string $state): string
     {
         return [
-            self::OPEN_OK      => '一致',
+            self::OPEN_OK      => '套餐一致',
             self::OPEN_SHORT   => '套餐打少了',
             self::OPEN_OVER    => '套餐打多了',
             self::OPEN_NONE    => '未打套餐',
             self::OPEN_NOGUEST => '未填人数',
+            self::OPEN_SKIP    => '免核对',
         ][$state] ?? $state;
     }
 

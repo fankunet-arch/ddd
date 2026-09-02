@@ -9,6 +9,9 @@
  *
  * 配合 config.php 中建议的只读数据库账号，形成双重保险。
  *
+ * 配置分两层：lib/settings.php 是随程序更新的功能默认值，
+ * config.php 是站点自己的连接信息与密码，可覆盖其中任意一项。
+ *
  * 底层驱动支持 PDO 与 mysqli 两种，自动选择可用的那个：
  * 很多老服务器只装了 mysqli 而没有 pdo_mysql，或者启用 pdo_mysql 会导致
  * PHP 启动失败。两条路都走得通，就不必为了跑这个程序去动 php.ini。
@@ -19,22 +22,94 @@ declare(strict_types=1);
 final class Db
 {
     private static ?DbDriver $driver = null;
-    private static array $cfg = [];
+    private static array $cfg  = [];
+    private static array $over = [];
 
-    /** 禁止出现在 SQL 中的写操作关键字 */
+    /**
+     * 禁止出现在 SQL 中的关键字（按词匹配）。
+     *
+     * 注意 LOAD_FILE 不能靠 LOAD 挡住 —— 下划线是单词字符，\bLOAD\b 匹配不到
+     * LOAD_FILE，所以必须单列一条。SLEEP / BENCHMARK / GET_LOCK 不写数据，
+     * 但能把连接拖住不放，一并挡掉。
+     */
     private const FORBIDDEN = [
         'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'TRUNCATE', 'DROP',
         'CREATE', 'ALTER', 'RENAME', 'GRANT', 'REVOKE', 'LOCK', 'UNLOCK',
         'CALL', 'LOAD', 'HANDLER', 'START', 'COMMIT', 'ROLLBACK', 'SET',
-        'INTO OUTFILE', 'INTO DUMPFILE',
+        'LOAD_FILE', 'SLEEP', 'BENCHMARK', 'GET_LOCK', 'RELEASE_LOCK',
     ];
 
+    /**
+     * 多词构造，必须按「允许任意空白」匹配。
+     *
+     * 曾经把 'INTO OUTFILE' 当普通关键字放在上面的列表里，那样只能匹配
+     * 中间恰好一个空格的写法 —— INTO␣␣OUTFILE、INTO\nOUTFILE 全都能绕过去，
+     * 而这恰恰是清单里唯一真能往磁盘写文件的一条。
+     */
+    private const FORBIDDEN_RE = [
+        'INTO OUTFILE'      => '/\bINTO\s+OUTFILE\b/',
+        'INTO DUMPFILE'     => '/\bINTO\s+DUMPFILE\b/',
+        'INTO @变量'         => '/\bINTO\s+@/',
+        'PROCEDURE ANALYSE' => '/\bPROCEDURE\s+ANALYSE\b/',
+    ];
+
+    /**
+     * 生效的配置 = lib/settings.php 的默认值，被 config.php 里写了的键覆盖。
+     *
+     * 这样分两层是有原因的：config.php 装着数据库密码，是站点自己维护的，
+     * 升级程序时基本不会重新上传。功能参数如果只写在那边，新版本加的参数
+     * 就永远读不到，功能会静默失效。所以功能默认值放在随程序更新的
+     * lib/settings.php 里，config.php 只在需要时覆盖个别键。
+     */
     public static function config(): array
     {
         if (!self::$cfg) {
-            self::$cfg = require __DIR__ . '/../config.php';
+            $defaults = (array) require __DIR__ . '/settings.php';
+            self::$over = (array) require __DIR__ . '/../config.php';
+            // 「+」保留左边已有的键，即 config.php 写了的优先，没写的用默认值
+            self::$cfg = self::$over + $defaults;
+            self::applyTimezone(self::$cfg);
         }
         return self::$cfg;
+    }
+
+    /**
+     * 把 PHP 的时区对齐到 POS 所在时区。
+     *
+     * PHP 用自己的时钟算「今天是哪个营业日」和「这张台开了多久」，而时间数据是
+     * POS 写进数据库的本地时间。php.ini 没设 date.timezone 时 PHP 默认走 UTC，
+     * 两边就会差出 1~2 小时 —— 已开台时长为负、滞留告警误报、跨零点取错营业日，
+     * 而且都不报错，只是数字悄悄不对。所以这里显式设定。
+     */
+    private static function applyTimezone(array $cfg): void
+    {
+        $tz = trim((string) ($cfg['timezone'] ?? ''));
+        if ($tz === '') {
+            return;                       // 留空 = 不干预，用 php.ini 的设置
+        }
+        // 时区名写错不该让整个程序打不开，忽略即可（checkdb 会报出来）
+        try {
+            new DateTimeZone($tz);
+            date_default_timezone_set($tz);
+        } catch (Throwable $e) {
+            // 保持 php.ini 的设置
+        }
+    }
+
+    /**
+     * config.php 里【显式写了】的那些键。
+     * 用来区分「用的是程序默认值」还是「站点自己配的」，页面上会据此提示。
+     */
+    public static function overrides(): array
+    {
+        self::config();
+        return self::$over;
+    }
+
+    /** 程序自带的功能默认值（lib/settings.php），不含 config.php 的覆盖 */
+    public static function defaults(): array
+    {
+        return (array) require __DIR__ . '/settings.php';
     }
 
     /** 当前实际使用的驱动名：pdo 或 mysqli */
@@ -116,7 +191,9 @@ final class Db
         $clean = preg_replace('#/\*.*?\*/#s', ' ', $sql);
         $clean = preg_replace('#--[^\n]*#', ' ', (string) $clean);
         $clean = preg_replace('#\#[^\n]*#', ' ', (string) $clean);
-        $upper = strtoupper(trim((string) $clean));
+        // 空白统一压成单个空格，这样 INTO␣␣OUTFILE、INTO\nOUTFILE 之类
+        // 变形写法不会从多词规则的缝里溜过去
+        $upper = strtoupper(trim((string) preg_replace('/\s+/', ' ', (string) $clean)));
 
         if (strncmp($upper, 'SELECT', 6) !== 0) {
             throw new RuntimeException('只读模式：仅允许 SELECT 语句');
@@ -128,6 +205,11 @@ final class Db
             // \b 词边界，避免误伤 "order_start_time" 之类的列名
             if (preg_match('/\b' . preg_quote($kw, '/') . '\b/', $upper)) {
                 throw new RuntimeException("只读模式：SQL 中不允许出现 {$kw}");
+            }
+        }
+        foreach (self::FORBIDDEN_RE as $label => $re) {
+            if (preg_match($re, $upper)) {
+                throw new RuntimeException("只读模式：SQL 中不允许出现 {$label}");
             }
         }
     }
