@@ -163,6 +163,16 @@ pageHeader('开台核对', 'open');
   <p class="err"><?= h($error) ?></p>
 <?php endif; ?>
 
+<?php if ($data !== null && $data['sum']['clock_skew'] > 0): ?>
+  <p class="err">有 <?= num($data['sum']['clock_skew']) ?> 张台的开台时间在「未来」——
+    说明本机（PHP）与 POS 数据库的<strong>时钟或时区对不上</strong>。
+    这会让「已开台」时长和「开台超 <?= (int) $warnHours ?> 小时」的提醒全部失真，
+    跨零点时还可能取错营业日。
+    请在 config.php 里把 <code>timezone</code> 设成 POS 所在时区
+    （当前为 <code><?= h(date_default_timezone_get()) ?></code>），
+    或校准两台机器的时钟；跑一次 <code>tests/checkdb.php</code> 能看到具体差了多少。</p>
+<?php endif; ?>
+
 <?php if (!$comboIds): ?>
   <p class="err"><code>combo_item_ids</code> 是空的，套餐份数会全部显示为 0。
     请先把按人头的套餐菜品 ID 填进去。</p>
@@ -240,7 +250,8 @@ pageHeader('开台核对', 'open');
       return [
           'cls'   => $cls,
           'table' => $r['table'] !== '' ? $r['table'] : '#' . $r['id'],
-          'dur'   => $r['minutes'] === null ? '—'
+          // 负数会渲染成「0:-45」这种鬼东西，直接显示 —，另有横幅说明原因
+          'dur'   => ($r['minutes'] === null || $r['minutes'] < 0) ? '—'
                      : intdiv($r['minutes'], 60) . ':' . str_pad((string) ($r['minutes'] % 60), 2, '0', STR_PAD_LEFT),
           // 免核对的台不做人数/套餐比对，差额没有意义，一律显示 —
           'diff'  => ($r['guests'] > 0 && empty($r['skip']))
@@ -470,7 +481,17 @@ pageHeader('开台核对', 'open');
         array_key_exists('combo_item_ids', Db::overrides()) ? '（config.php 里配的）'
                                                            : '（lib/settings.php 默认值）' ?></span></summary>
     <div style="padding:14px 16px">
-      <?php if (!$comboIds): ?>
+      <?php if ($data !== null && $data['sum']['clock_skew'] > 0): ?>
+  <p class="err">有 <?= num($data['sum']['clock_skew']) ?> 张台的开台时间在「未来」——
+    说明本机（PHP）与 POS 数据库的<strong>时钟或时区对不上</strong>。
+    这会让「已开台」时长和「开台超 <?= (int) $warnHours ?> 小时」的提醒全部失真，
+    跨零点时还可能取错营业日。
+    请在 config.php 里把 <code>timezone</code> 设成 POS 所在时区
+    （当前为 <code><?= h(date_default_timezone_get()) ?></code>），
+    或校准两台机器的时钟；跑一次 <code>tests/checkdb.php</code> 能看到具体差了多少。</p>
+<?php endif; ?>
+
+<?php if (!$comboIds): ?>
         <p class="empty">清单为空。</p>
       <?php else: ?>
       <div class="tablewrap"><table class="grid small stick">

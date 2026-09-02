@@ -126,10 +126,32 @@ try {
     okmsg('MySQL 版本: ' . $v['v']);
     okmsg('当前账号: ' . $v['u']);
     okmsg('当前库: ' . $v['d']);
-    okmsg('数据库时间: ' . $v['n'] . '（PHP 时间: ' . date('Y-m-d H:i:s') . '）');
+    okmsg('数据库时间: ' . $v['n'] . '（PHP 时间: ' . date('Y-m-d H:i:s')
+        . '，时区 ' . date_default_timezone_get() . '）');
 
-    if (abs(strtotime($v['n']) - time()) > 300) {
-        warnmsg('数据库与 PHP 的时间相差超过 5 分钟，"今天"的判断可能不准');
+    // 时钟／时区对不上是最难自己发现的一类问题：不报错，只是所有跟时间
+    // 有关的数字悄悄不对 —— 已开台时长、滞留告警、跨零点的营业日归属。
+    $skew = strtotime((string) $v['n']) - time();
+    $abs  = abs($skew);
+    if ($abs <= 90) {
+        okmsg('时钟一致（相差 ' . $abs . ' 秒）');
+    } else {
+        $desc = $skew > 0 ? '快' : '慢';
+        $txt  = $abs >= 3600
+            ? sprintf('%.1f 小时', $abs / 3600)
+            : sprintf('%d 分 %d 秒', intdiv($abs, 60), $abs % 60);
+        // 差值接近整小时 → 基本可以断定是时区而不是时钟漂移
+        $nearHour = $abs >= 1800 && abs($abs - round($abs / 3600) * 3600) < 300;
+        $msg = "数据库时间比 PHP {$desc} {$txt} —— "
+             . '「已开台」时长、「开台超时」提醒都会失真，跨零点时还可能取错营业日。';
+        if ($nearHour) {
+            $msg .= ' 差值接近整小时，基本可以断定是【时区】不一致：'
+                  . '请把 config.php 的 timezone 设成 POS 所在时区'
+                  . '（当前 PHP 用的是 ' . date_default_timezone_get() . '）。';
+            errmsg($msg);
+        } else {
+            warnmsg($msg . ' 请校准两台机器的时钟。');
+        }
     }
 } catch (Throwable $e) {
     errmsg('连接失败: ' . $e->getMessage());

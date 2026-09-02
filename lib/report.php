@@ -394,7 +394,9 @@ final class Report
         $sum  = ['tables' => 0, 'guests' => 0, 'combo' => 0.0, 'amount' => 0.0,
                  'problem' => 0, 'acked' => 0, 'stale' => 0, 'skip' => 0,
                  'drink' => 0.0, 'drink_amount' => 0.0,
-                 'combo_problem' => 0, 'drink_problem' => 0];
+                 'combo_problem' => 0, 'drink_problem' => 0,
+                 // 出现「开台时间在未来」= PHP 与数据库时钟／时区对不上
+                 'clock_skew' => 0];
         $now  = time();
 
         foreach ($heads as $h) {
@@ -441,9 +443,15 @@ final class Report
             }
             $drinkShort = max(0.0, $need - $drink);
 
+            // strtotime 解析失败返回 false，要当成「没有时间」而不是 1970 年
             $t0   = $h['t0'] ? strtotime((string) $h['t0']) : null;
-            $mins = $t0 ? (int) floor(($now - $t0) / 60) : null;
-            $stale = $mins !== null && $mins >= $warnHours * 60;
+            $t0   = ($t0 === false) ? null : $t0;
+            $mins = $t0 !== null ? (int) floor(($now - $t0) / 60) : null;
+            // 开台时间在未来 → 本机时钟或时区与数据库对不上，时长没有意义
+            $skew = $mins !== null && $mins < 0;
+            // warnHours <= 0 表示关掉滞留提醒（与 min_drink 的 0 = 不核对一致），
+            // 否则填 0 会把每一张台都标红，等于没提醒
+            $stale = $warnHours > 0 && $mins !== null && !$skew && $mins >= $warnHours * 60;
 
             // 套餐、酒水任一项不合格，这张台就要人看一眼
             $comboBad = $state !== self::OPEN_OK && $state !== self::OPEN_SKIP;
@@ -487,6 +495,7 @@ final class Report
                 'start'    => (string) ($h['t0'] ?? ''),
                 'minutes'  => $mins,
                 'stale'    => $stale,
+                'skew'     => $skew,
                 'employee' => (string) ($h['employee'] ?? ''),
             ];
 
@@ -515,6 +524,9 @@ final class Report
             }
             if ($stale) {
                 $sum['stale']++;
+            }
+            if ($skew) {
+                $sum['clock_skew']++;
             }
         }
 

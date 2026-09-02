@@ -80,6 +80,57 @@ foreach ([
 }
 
 // =====================================================================
+echo "\n【1b】只读防线：绕过尝试\n";
+// 这一组是体检时补的。原来的实现有两个真实缺口：
+//   1. 'INTO OUTFILE' 当普通关键字匹配，只认中间恰好一个空格 ——
+//      INTO␣␣OUTFILE、INTO\nOUTFILE 全都能绕过去，而这是清单里唯一
+//      真能往磁盘写文件的一条。
+//   2. \bLOAD\b 匹配不到 LOAD_FILE（下划线是单词字符）。
+// =====================================================================
+
+foreach ([
+    // 空白变形：多个空格、换行、制表符
+    "SELECT * FROM t INTO  OUTFILE '/tmp/x'",
+    "SELECT * FROM t INTO\nOUTFILE '/tmp/x'",
+    "SELECT * FROM t INTO\tOUTFILE '/tmp/x'",
+    "SELECT * FROM t INTO   DUMPFILE '/tmp/x'",
+    "SELECT * FROM t INTO\n\t DUMPFILE '/tmp/x'",
+    // 读服务器文件 / 写用户变量
+    "SELECT LOAD_FILE('/etc/passwd')",
+    "SELECT 1 INTO @a",
+    "SELECT 1 INTO   @a",
+    // 拖住连接（不写数据，但能把库拖垮）
+    "SELECT SLEEP(10)",
+    "SELECT BENCHMARK(100000000,MD5('a'))",
+    "SELECT GET_LOCK('x',100)",
+    "SELECT RELEASE_LOCK('x')",
+    "SELECT * FROM t PROCEDURE ANALYSE()",
+    // 大小写与前导空白
+    "select * from t into outfile '/tmp/x'",
+    "\n\t SELECT 1 INTO OUTFILE '/x'",
+] as $bad) {
+    throws('拦截: ' . substr(str_replace(["\n", "\t"], ' ', $bad), 0, 44),
+           static fn() => Db::assertReadOnly($bad));
+}
+
+// 正常语句不能被这批新规则误伤
+foreach ([
+    "SELECT a INTO_SOMETHING FROM t",   // 列名里含 INTO 不该中招
+    "SELECT sleepy_col FROM t",         // 列名以 sleep 开头不该中招
+    "SELECT time_load FROM t",          // 含 load 的列名不该中招
+] as $good) {
+    ok('不误伤: ' . substr($good, 0, 44), (static function () use ($good) {
+        try { Db::assertReadOnly($good); return true; } catch (Throwable $e) { return false; }
+    })());
+}
+
+// 关键字出现在字符串常量里也会被拒 —— 这是【故意】保守：
+// 本程序的 SQL 全部由模板生成，任何用户输入都走参数绑定，永远不会把
+// 关键字写进字符串常量。宁可误杀（查询被拒，看得见）也不放过（写操作溜过去）。
+throws('字符串常量里的关键字也照拒（故意从严，失败即拒绝）',
+       static fn() => Db::assertReadOnly("SELECT * FROM t WHERE a = 'INTO OUTFILE'"));
+
+// =====================================================================
 echo "\n【2】真实生成的 SQL 必须能通过只读检查\n";
 // =====================================================================
 
@@ -622,6 +673,137 @@ ok('酒水仍不足时多点一杯，确认保留',
 ok('酒水补齐后确认作废（状态已变）',
    !Report::buildOpenTables($aHead, [$dc(1, 4, 4)], 4, $aAck, [], ['min_drink' => 1])
        ['rows'][0]['acked']);
+
+// =====================================================================
+echo "\n【2e4】时钟与时区\n";
+// PHP 用自己的时钟算「开了多久」，时间数据却是 POS 写的。php.ini 没设
+// date.timezone 时 PHP 走 UTC，两边差 1~2 小时 —— 不报错，只是所有跟
+// 时间有关的数字悄悄不对，这是最难自己发现的一类问题。
+// =====================================================================
+
+$tzHead = static fn($sec) => [['order_head_id' => 1,
+    't0' => date('Y-m-d H:i:s', time() + $sec), 'guests' => 2, 'table_name' => 'T',
+    'employee' => '', 'amount' => 0, 'checks' => 1, 'eat_type' => 0,
+    'status' => 0, 'settled' => 0]];
+
+$future = Report::buildOpenTables($tzHead(7200), []);
+ok('开台时间在未来 → 标记 skew', !empty($future['rows'][0]['skew']));
+ok('时钟异常时不再误报滞留', !$future['rows'][0]['stale']);
+eq('汇总里记下异常台数', $future['sum']['clock_skew'], 1);
+
+$normal = Report::buildOpenTables($tzHead(-600), []);
+ok('正常开台不报时钟异常', empty($normal['rows'][0]['skew']));
+eq('正常时汇总为 0', $normal['sum']['clock_skew'], 0);
+
+$long = Report::buildOpenTables($tzHead(-5 * 3600), [], 4);
+ok('开台 5 小时仍正常判为滞留', $long['rows'][0]['stale'] && empty($long['rows'][0]['skew']));
+eq('滞留台不算时钟异常', $long['sum']['clock_skew'], 0);
+
+// warn_hours <= 0 表示关掉提醒，而不是「全部标红」
+ok('warn_hours = 0 关掉滞留提醒',
+   !Report::buildOpenTables($tzHead(-99 * 3600), [], 0)['rows'][0]['stale']);
+ok('warn_hours 负数同样关掉',
+   !Report::buildOpenTables($tzHead(-99 * 3600), [], -1)['rows'][0]['stale']);
+
+// 时间字段是垃圾字符串时，不能被 strtotime 当成 1970 年从而误报滞留
+$junk = Report::buildOpenTables([['order_head_id' => 1, 't0' => '不是时间', 'guests' => 2,
+    'table_name' => 'T', 'employee' => '', 'amount' => 0, 'checks' => 1,
+    'eat_type' => 0, 'status' => 0, 'settled' => 0]], []);
+eq('无法解析的时间 → minutes 为 null', $junk['rows'][0]['minutes'], null);
+ok('无法解析的时间不误报滞留', !$junk['rows'][0]['stale']);
+ok('无法解析的时间不误报时钟异常', empty($junk['rows'][0]['skew']));
+
+// 程序必须显式设定时区，不能听凭 php.ini（没设时 PHP 默认 UTC）
+$settingsTz = require __DIR__ . '/../lib/settings.php';
+ok('settings.php 带 timezone 项', array_key_exists('timezone', $settingsTz));
+ok('默认时区可用', $settingsTz['timezone'] === ''
+   || (static function () use ($settingsTz) {
+        try { new DateTimeZone($settingsTz['timezone']); return true; }
+        catch (Throwable $e) { return false; } })());
+ok('页面会提示时钟异常',
+   strpos((string) file_get_contents(__DIR__ . '/../open.php'), 'clock_skew') !== false);
+ok('checkdb 会报出时钟差',
+   strpos((string) file_get_contents(__DIR__ . '/checkdb.php'), '时钟一致') !== false);
+
+// =====================================================================
+echo "\n【2e5】两种驱动的返回类型必须算出同样结果\n";
+// PDO 默认把所有列取成字符串，mysqli + mysqlnd 取成原生类型。
+// 同一段代码在两种驱动下必须完全一致，否则换个驱动数字就变了。
+// =====================================================================
+
+$asString = static fn(array $rows) => array_map(
+    static fn($r) => array_map(static fn($v) => $v === null ? null : (string) $v, $r), $rows);
+
+$tHeads = [
+    ['order_head_id' => 1, 't0' => date('Y-m-d H:i:s', time() - 3600), 'guests' => 4,
+     'table_name' => '11', 'employee' => 'A', 'amount' => 53.7, 'checks' => 1,
+     'eat_type' => 0, 'status' => 0, 'settled' => 0],
+    ['order_head_id' => 2, 't0' => date('Y-m-d H:i:s', time() - 3600), 'guests' => 0,
+     'table_name' => '9', 'employee' => 'B', 'amount' => 0.0, 'checks' => 2,
+     'eat_type' => 3, 'status' => 0, 'settled' => 1],
+];
+$tCnts = [['order_head_id' => 1, 'combo_qty' => 4, 'drink_qty' => 3,
+           'drink_amount' => 7.5, 'dish_qty' => 12, 'lines_cnt' => 9]];
+eq('开台核对：两种驱动结果一致',
+   Report::buildOpenTables($tHeads, $tCnts, 4, [], [], ['min_drink' => 1]),
+   Report::buildOpenTables($asString($tHeads), $asString($tCnts), 4, [], [], ['min_drink' => 1]));
+
+$tSales = [['biz_date' => '2026-09-01', 'seg' => 'day', 'checks' => 3, 'guests' => 7,
+            'actual' => 150.5, 'original' => 160.0, 'discount' => -9.5, 'service' => 0,
+            'tax' => 13.7, 'should_amt' => 150.5, 'ret' => 0]];
+eq('营业额透视：两种驱动结果一致',
+   Report::pivotSales($tSales), Report::pivotSales($asString($tSales)));
+
+$tMenu = [431 => ['name' => 'Agua', 'print_class' => 6, 'is_condiment' => false, 'price' => 2.0]];
+$tDet  = [['menu_item_id' => 431, 'item_name' => 'Agua', 'seg' => 'day',
+           'qty' => 10, 'times' => 5, 'amount' => 20.0]];
+eq('菜品汇总：两种驱动结果一致',
+   Report::buildDishes($tMenu, [6 => 'bebidas'], $tDet),
+   Report::buildDishes($tMenu, [6 => 'bebidas'], $asString($tDet)));
+
+$tSt = [['pc' => 6, 'seg' => 'day', 'orders' => 12, 'items' => 3, 'qty' => 30,
+         'lines_cnt' => 25, 'amount' => 60.0]];
+eq('岗位单量：两种驱动结果一致',
+   Report::buildStations([6 => 'bebidas'], $tSt),
+   Report::buildStations([6 => 'bebidas'], $asString($tSt)));
+
+// =====================================================================
+echo "\n【2e6】配置写错也不能把程序搞崩\n";
+// config.php 是人手工改的，写成字符串、写成 null、少写一项都可能发生。
+// =====================================================================
+
+$cfgMenu = [1 => ['name' => 'A', 'print_class' => 6, 'is_condiment' => false, 'price' => 1.0]];
+ok('免核对规则写成字符串不炸', is_array(Report::skipRules(['no_combo_tables' => 'Llevar*'])));
+ok('免核对规则写成 null 不炸',  is_array(Report::skipRules(['no_combo_tables' => null])));
+ok('eat_types 写成字符串不炸',  is_array(Report::skipRules(['no_combo_eat_types' => '3'])));
+ok('酒水岗位写成字符串不炸',
+   is_array(Report::drinkItems($cfgMenu, [6 => 'bebidas'], ['drink_print_classes' => 'bebidas*'])));
+ok('酒水配置整个缺失不炸',
+   is_array(Report::drinkItems($cfgMenu, [6 => 'bebidas'], [])));
+ok('通配符 * 匹配全部岗位',
+   Report::drinkItems($cfgMenu, [6 => 'bebidas'], ['drink_print_classes' => ['*']])['ids'] === [1]);
+ok('规则里的正则元字符不会炸',
+   Report::matchesAny('a', ['(((', '[[[', '\\', '+*?', '$^']) === false);
+ok('非法 UTF-8 桌号不炸', is_bool(Report::matchesAny("\xC3\x28", ['A*'])));
+ok('超长桌号不炸',        is_bool(Report::matchesAny(str_repeat('A', 10000), ['A*'])));
+
+$mdH = [['order_head_id' => 1, 't0' => date('Y-m-d H:i:s'), 'guests' => 2, 'table_name' => 'T',
+         'employee' => '', 'amount' => 0, 'checks' => 1, 'eat_type' => 0,
+         'status' => 0, 'settled' => 0]];
+$mdC = [['order_head_id' => 1, 'combo_qty' => 2, 'drink_qty' => 1, 'dish_qty' => 3, 'lines_cnt' => 3]];
+eq('min_drink 负数视为不核对',
+   Report::buildOpenTables($mdH, $mdC, 4, [], [], ['min_drink' => -1])['rows'][0]['drink_state'],
+   Report::DRINK_NA);
+eq('min_drink 写成字符串也能用',
+   Report::buildOpenTables($mdH, $mdC, 4, [], [], ['min_drink' => '2'])['rows'][0]['drink_state'],
+   Report::DRINK_SHORT);
+
+// 明细里混进开台列表没有的订单，不能串到别的台上
+$stray = Report::buildOpenTables($mdH,
+    [['order_head_id' => 999, 'combo_qty' => 99, 'drink_qty' => 99,
+      'dish_qty' => 99, 'lines_cnt' => 9]]);
+eq('明细里的野订单不串台', $stray['rows'][0]['combo'], 0.0);
+eq('野订单不会凭空多出一行', count($stray['rows']), 1);
 
 // =====================================================================
 echo "\n【2f2】开台核对的人工确认\n";
