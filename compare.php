@@ -34,9 +34,16 @@ $withDish = qbool('with_dish');
 $withStn  = qbool('with_station');
 $withLive = !isset($_GET['go']) || qbool('with_live');
 $seg      = in_array(q('seg', 'total'), ['day', 'night', 'total'], true) ? q('seg', 'total') : 'total';
+// 涨跌配色：默认绿涨红跌，config 里可翻成股市习惯的红涨绿跌
+$redUp    = !empty($cfg['trend_red_up']);
 
-// 本期：快捷模式按天数往前推，自选模式用填进来的日期
-if ($preset !== '' && !isset($_GET['start'])) {
+// 本期：选了快捷天数就一律按天数算，忽略表单里带上来的 start/end。
+//
+// 这里踩过一次：原来写的是「preset 非空【且】没传 start 才按天数算」，
+// 可表单里的日期框本来就会跟着一起提交 —— 用户把下拉从 7 天切到 30 天时，
+// 浏览器同时带上了旧的 start/end，于是永远走进 else 分支，切了等于没切。
+// 规则改成【preset 优先】：要自选日期就把下拉切到「自选日期」。
+if ($preset !== '') {
     [$curStart, $curEnd] = Biz::lastDays((int) $preset, $today);
 } else {
     $curStart = q('start', $today);
@@ -136,22 +143,35 @@ if (isset($_GET['go'])) {
     }
 }
 
-/** 涨跌显示：正数绿、负数红，上期为 0 时显示「新增」而不是硬算百分比 */
-function trend(?float $diff, ?float $rate, string $fmt = 'money'): string
+/**
+ * 涨跌显示。
+ *
+ * 三重冗余，不只靠颜色：
+ *   1. 箭头 ▲ / ▼ —— 约 8% 的男性有红绿色觉障碍，只靠颜色他们分不出来
+ *   2. 正负号 + / −
+ *   3. 颜色（绿涨红跌，可在 config 里翻成红涨绿跌）
+ * 即使样式表没加载，光看文字也知道是涨是跌。
+ *
+ * 上期为 0 时不硬算百分比 —— 显示「新增」而不是 100% 或 ∞。
+ */
+function trend(?float $diff, ?float $rate, string $fmt = 'money', bool $redUp = false): string
 {
     if ($diff === null) {
         return '<span class="dim">—</span>';
     }
+    $ru = $redUp ? ' ru' : '';
     if (abs($diff) < 0.005) {
-        return '<span class="trend flat">持平</span>';
+        return '<span class="trend flat">— 持平</span>';
     }
-    $cls  = $diff > 0 ? 'up' : 'down';
-    $sign = $diff > 0 ? '+' : '−';
+    $up   = $diff > 0;
+    $cls  = ($up ? 'up' : 'down') . $ru;
+    $arrow = $up ? '▲' : '▼';
+    $sign  = $up ? '+' : '−';
     $val = $fmt === 'money' ? money(abs($diff)) : num(abs($diff));
     $pct = $rate === null
-        ? ($diff > 0 ? '新增' : '')
-        : ($rate > 0 ? '+' : ($rate < 0 ? '−' : '')) . number_format(abs($rate) * 100, 1) . '%';
-    return '<span class="trend ' . $cls . '">' . $sign . $val
+        ? ($up ? '新增' : '')
+        : number_format(abs($rate) * 100, 1) . '%';
+    return '<span class="trend ' . $cls . '">' . $arrow . ' ' . $sign . $val
          . ($pct !== '' ? ' <em>' . h($pct) . '</em>' : '') . '</span>';
 }
 
@@ -169,10 +189,12 @@ pageHeader('期间对比', 'compare');
         <option value=""   <?= $preset === ''   ? 'selected' : '' ?>>自选日期</option>
       </select>
     </label>
+    <?php // 改日期就自动切到「自选日期」，否则快捷天数会盖掉手填的日期
+    $toCustom = 'onchange="var p=this.form.preset; if(p) p.value=\'\';"'; ?>
     <label>本期开始
-      <input type="date" name="start" value="<?= h($curStart) ?>"></label>
+      <input type="date" name="start" value="<?= h($curStart) ?>" <?= $toCustom ?>></label>
     <label>本期结束
-      <input type="date" name="end" value="<?= h($curEnd) ?>"></label>
+      <input type="date" name="end" value="<?= h($curEnd) ?>" <?= $toCustom ?>></label>
     <label>时段
       <select name="seg">
         <option value="total" <?= $seg === 'total' ? 'selected' : '' ?>>全天</option>
@@ -243,14 +265,15 @@ pageHeader('期间对比', 'compare');
     ];
     foreach ($tiles as [$label, $key, $fmt]):
         $m = $S[$key];
-        $cls = abs($m['diff']) < 0.005 ? '' : ($m['diff'] > 0 ? 'good' : 'bad');
+        $cls = abs($m['diff']) < 0.005 ? '' : ($m['diff'] > 0 ? 't-up' : 't-down');
+        if ($cls !== '' && $redUp) { $cls .= ' ru'; }
     ?>
       <div class="card <?= $cls ?>">
         <h3><?= h($label) ?><?= $seg !== 'total' ? '（' . h(Biz::segLabel($seg)) . '）' : '' ?></h3>
         <div class="big"><?= $fmt === 'money' ? money($m['cur']) : num($m['cur']) ?></div>
         <dl>
           <dt>上期</dt><dd><?= $fmt === 'money' ? money($m['prev']) : num($m['prev']) ?></dd>
-          <dt>涨跌</dt><dd><?= trend($m['diff'], $m['rate'], $fmt) ?></dd>
+          <dt>涨跌</dt><dd><?= trend($m['diff'], $m['rate'], $fmt, $redUp) ?></dd>
           <?php if ($curDays > 0 && $prevDays > 0 && in_array($key, ['actual', 'guests', 'checks'], true)): ?>
             <dt>日均</dt>
             <dd><?= $fmt === 'money' ? money($m['cur'] / $curDays) : num(round($m['cur'] / $curDays)) ?>
@@ -279,13 +302,13 @@ pageHeader('期间对比', 'compare');
         <td><strong><?= $sg === 'total' ? '全天合计' : h(Biz::segLabel($sg)) ?></strong></td>
         <td class="n"><?= money($r['actual']['cur']) ?></td>
         <td class="n dim"><?= money($r['actual']['prev']) ?></td>
-        <td class="n"><?= trend($r['actual']['diff'], $r['actual']['rate']) ?></td>
+        <td class="n"><?= trend($r['actual']['diff'], $r['actual']['rate'], 'money', $redUp) ?></td>
         <td class="n"><?= num($r['guests']['cur']) ?></td>
         <td class="n dim"><?= num($r['guests']['prev']) ?></td>
-        <td class="n"><?= trend($r['guests']['diff'], $r['guests']['rate'], 'num') ?></td>
+        <td class="n"><?= trend($r['guests']['diff'], $r['guests']['rate'], 'num', $redUp) ?></td>
         <td class="n hide-sm"><?= num($r['checks']['cur']) ?></td>
         <td class="n hide-sm dim"><?= num($r['checks']['prev']) ?></td>
-        <td class="n hide-sm"><?= trend($r['checks']['diff'], $r['checks']['rate'], 'num') ?></td>
+        <td class="n hide-sm"><?= trend($r['checks']['diff'], $r['checks']['rate'], 'num', $redUp) ?></td>
         <td class="n"><?= money($r['per_guest']['cur']) ?></td>
         <td class="n dim"><?= money($r['per_guest']['prev']) ?></td>
       </tr>
@@ -322,8 +345,8 @@ pageHeader('期间对比', 'compare');
               : '<span class="dim">无对应</span>' ?></td>
         <td class="n dim"><?= $d['prev_amt'] === null ? '—' : money($d['prev_amt']) ?></td>
         <td class="n hide-sm dim"><?= $d['prev_gue'] === null ? '—' : num($d['prev_gue']) ?></td>
-        <td class="n"><?= trend($d['amt_diff'], $d['amt_rate']) ?></td>
-        <td class="n hide-sm"><?= trend($d['gue_diff'], $d['gue_rate'], 'num') ?></td>
+        <td class="n"><?= trend($d['amt_diff'], $d['amt_rate'], 'money', $redUp) ?></td>
+        <td class="n hide-sm"><?= trend($d['gue_diff'], $d['gue_rate'], 'num', $redUp) ?></td>
       </tr>
     <?php endforeach; ?>
     </tbody>
@@ -357,7 +380,7 @@ pageHeader('期间对比', 'compare');
                 <td class="dim hide-sm"><?= h($r['pc_name']) ?></td>
                 <td class="n"><?= qty($r['cur']) ?></td>
                 <td class="n dim"><?= qty($r['prev']) ?></td>
-                <td class="n"><?= trend($r['diff'], $r['rate'], 'num') ?></td>
+                <td class="n"><?= trend($r['diff'], $r['rate'], 'num', $redUp) ?></td>
               </tr>
             <?php endforeach; ?>
             </tbody>
@@ -386,7 +409,7 @@ pageHeader('期间对比', 'compare');
           <td><strong><?= h($r['name']) ?></strong></td>
           <td class="n"><?= num($r['cur']) ?></td>
           <td class="n dim"><?= num($r['prev']) ?></td>
-          <td class="n"><?= trend($r['diff'], $r['rate'], 'num') ?></td>
+          <td class="n"><?= trend($r['diff'], $r['rate'], 'num', $redUp) ?></td>
           <td class="n hide-sm"><?= money($r['cur_amt'] ?? 0) ?></td>
           <td class="n hide-sm dim"><?= money($r['prev_amt'] ?? 0) ?></td>
         </tr>

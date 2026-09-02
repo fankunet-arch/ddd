@@ -70,8 +70,11 @@ final class Biz
     {
         $n = max(1, $n);
         $today = $today ?? date('Y-m-d', time() - (int) Db::config()['day_cut_hour'] * 3600);
-        $start = date('Y-m-d', strtotime($today . ' -' . ($n - 1) . ' day'));
-        return [$start, $today];
+        $t = strtotime($today . ' -' . ($n - 1) . ' day');
+        if ($t === false) {
+            return [$today, $today];        // 解析不了就退回单日，交给 validateRange 报错
+        }
+        return [date('Y-m-d', $t), $today];
     }
 
     /**
@@ -85,10 +88,23 @@ final class Biz
      */
     public static function prevRange(string $start, string $end): array
     {
+        // 日期解析不了时不能硬算：strtotime 返回 false，在 strict_types 下
+        // 传给 date() 会抛 TypeError。这个函数在页面上是【先于】校验调用的，
+        // 抛出去就是白屏。原样返回，让 validateRange 去报「日期格式不正确」。
         $days = self::rangeDays($start, $end);
-        $pEnd   = date('Y-m-d', strtotime($start . ' -1 day'));
-        $pStart = date('Y-m-d', strtotime($pEnd . ' -' . ($days - 1) . ' day'));
-        return [$pStart, $pEnd];
+        if ($days <= 0) {
+            return [$start, $end];
+        }
+        $tEnd = strtotime($start . ' -1 day');
+        if ($tEnd === false) {
+            return [$start, $end];
+        }
+        $pEnd  = date('Y-m-d', $tEnd);
+        $tStart = strtotime($pEnd . ' -' . ($days - 1) . ' day');
+        if ($tStart === false) {
+            return [$start, $end];
+        }
+        return [date('Y-m-d', $tStart), $pEnd];
     }
 
     /** 区间天数（含首尾） */
@@ -108,7 +124,11 @@ final class Biz
         $out = [];
         $days = self::rangeDays($start, $end);
         for ($i = 0; $i < $days; $i++) {
-            $out[] = date('Y-m-d', strtotime($start . ' +' . $i . ' day'));
+            $t = strtotime($start . ' +' . $i . ' day');
+            if ($t === false) {
+                break;                      // 同上：不硬算，宁可少列
+            }
+            $out[] = date('Y-m-d', $t);
         }
         return $out;
     }

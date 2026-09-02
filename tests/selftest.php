@@ -662,8 +662,51 @@ $flatS = Report::flattenStations(Report::buildStations([6 => 'bebidas'],
 eq('岗位压平后比的是单量', $flatS[6]['qty'], 12);
 eq('岗位压平后带金额', $flatS[6]['amount'], 60.0);
 
-// ---- 页面 ----
+// ---- 快捷天数必须压过表单带上来的 start/end ----
+// 踩过的坑：原来写的是「preset 非空【且】没传 start 才按天数算」，可日期框本来
+// 就会跟着表单一起提交 —— 用户把下拉从 7 天切到 30 天时浏览器同时带上了旧的
+// start/end，于是永远走 else 分支，切了等于没切。
 $cmpSrc = (string) file_get_contents(__DIR__ . '/../compare.php');
+ok('快捷天数优先于表单里的日期', strpos($cmpSrc, "if (\$preset !== '') {") !== false);
+ok('没有「且没传 start」这种会失效的判断',
+   strpos($cmpSrc, "!isset(\$_GET['start'])") === false);
+ok('改日期会自动切回自选', strpos($cmpSrc, "p.value=") !== false);
+
+// ---- 日期解析不了时不能抛异常 ----
+// prevRange 在页面上是【先于】validateRange 调用的，strtotime 失败返回 false，
+// 在 strict_types 下传给 date() 会抛 TypeError —— 抛出去就是白屏。
+foreach ([['abc', 'xyz'], ['', ''], ['2026-13-45', '2026-99-99'], ['x', '2026-09-02']] as [$a, $b]) {
+    ok("垃圾日期 '{$a}'~'{$b}' 不抛异常", (static function () use ($a, $b) {
+        try { Biz::prevRange($a, $b); Biz::dateList($a, $b); Biz::lastDays(7, $a); return true; }
+        catch (Throwable $e) { return false; }
+    })());
+}
+eq('垃圾日期时原样返回，交给校验去报错', Biz::prevRange('abc', 'xyz'), ['abc', 'xyz']);
+eq('垃圾日期的日期列表为空', Biz::dateList('abc', 'xyz'), []);
+ok('垃圾日期会被 validateRange 拦下', Biz::validateRange('abc', 'xyz') !== null);
+// 合法但不存在的日期（2 月 30 日）PHP 会自动归一，不应报错
+ok('2026-02-30 被归一而不是崩溃', Biz::prevRange('2026-02-30', '2026-02-30') !== ['2026-02-30', '2026-02-30']);
+
+// ---- 涨跌的颜色与无障碍 ----
+$cssSrc = (string) file_get_contents(__DIR__ . '/../assets/app.css');
+ok('涨跌不只靠颜色：输出了箭头',
+   strpos($cmpSrc, '▲') !== false && strpos($cmpSrc, '▼') !== false);
+ok('涨跌带正负号', strpos($cmpSrc, "'+' : '−'") !== false);
+ok('默认绿涨', strpos($cssSrc, '.trend.up{color:#1a7a4d') !== false);
+ok('默认红跌', strpos($cssSrc, '.trend.down{color:#b03a30') !== false);
+ok('可翻成红涨绿跌', strpos($cssSrc, '.trend.up.ru') !== false
+   && strpos($cssSrc, '.trend.down.ru') !== false);
+ok('卡片顶边也跟着翻转', strpos($cssSrc, '.card.t-up.ru') !== false);
+// 徽章会嵌在 13.5px 的表格和 12.5px 的卡片里，字号写成 em 会层层相乘，
+// 小屏上缩到 11.3px 看不清 —— 必须用绝对值
+ok('涨跌徽章用绝对字号，不跟着继承缩放',
+   strpos($cssSrc, 'border-radius:20px;font-size:12.5px') !== false
+   && strpos($cssSrc, '.trend em{font-style:normal;font-weight:400;font-size:12px') !== false);
+ok('配色开关来自配置', strpos($cmpSrc, "trend_red_up") !== false);
+$settingsTrend = require __DIR__ . '/../lib/settings.php';
+ok('settings 里有 trend_red_up', array_key_exists('trend_red_up', $settingsTrend));
+eq('默认是绿涨红跌', $settingsTrend['trend_red_up'], false);
+
 ok('对比页登录保护', strpos($cmpSrc, 'Auth::requireLogin()') !== false);
 ok('对比页校验两个区间',
    substr_count($cmpSrc, 'Biz::validateRange') >= 1
