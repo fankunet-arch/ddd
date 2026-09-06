@@ -8,6 +8,81 @@ function h($s): string
     return htmlspecialchars((string) $s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
+/**
+ * 静态文件的地址，带上「版本号」防止浏览器拿旧的缓存。
+ *
+ * 这是踩过的坑：只传了 .php 没传 assets/app.css，或者传了但浏览器还用着
+ * 缓存里的旧样式 —— 页面看着就是坏的（新控件完全没样式），
+ * 而这种问题从服务器端一点都看不出来。加了版本号，文件一变地址就变，
+ * 浏览器自然会重新下载，不需要教人按 Ctrl+F5。
+ *
+ * 版本号怎么来，看 config 的 asset_version：
+ *
+ *   'auto'  （默认）文件内容的哈希 —— 改了就立刻更新，没改就一直用缓存。
+ *                   最准，也不会白白重下。
+ *   'date'          今天的日期 —— 每天最多用一天的旧文件，第二天必定更新。
+ *                   FTP 上传会保留原文件时间戳的话，这个最稳妥。
+ *   'mtime'         文件的修改时间。
+ *   其它字符串       直接当版本号用（比如自己填个 '2026-09-06a'）。
+ *
+ * 读不到文件时一律退回日期，绝不返回不带版本号的地址。
+ */
+function asset(string $rel): string
+{
+    static $cache = [];
+    if (isset($cache[$rel])) {
+        return $cache[$rel];
+    }
+    require_once __DIR__ . '/db.php';
+    $mode = trim((string) (Db::config()['asset_version'] ?? 'auto'));
+    $file = dirname(__DIR__) . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $rel);
+
+    if ($mode === 'auto') {
+        $h = is_file($file) ? md5_file($file) : false;
+        $v = $h === false ? date('Ymd') : substr($h, 0, 8);
+    } elseif ($mode === 'mtime') {
+        $t = is_file($file) ? filemtime($file) : false;
+        $v = $t === false ? date('Ymd') : (string) $t;
+    } elseif ($mode === 'date' || $mode === '') {
+        $v = date('Ymd');
+    } else {
+        $v = $mode;                       // 自己填的固定版本号
+    }
+    return $cache[$rel] = $rel . '?v=' . rawurlencode($v);
+}
+
+/**
+ * 数据文件放错地方时的红字警告。
+ *
+ * 用到自有存储的页面（采购、库存）都要调一次。放在这里而不是各页各写一份，
+ * 是因为这条提醒漏掉一页就等于没有 —— 只要有一个页面不报警，
+ * 部署的人就可能一直以为没事。
+ */
+function storeBanner(): void
+{
+    if (!class_exists('Store')) {
+        return;                       // 不用自有存储的页面，什么都不做
+    }
+    $doc = Store::exposedUnder();
+    if ($doc === null) {
+        return;
+    }
+    $path = Store::path();
+    ?>
+  <p class="err"><strong>⚠️ 数据文件放在了网站可访问的目录里，请尽快挪走。</strong><br>
+    当前位置：<code><?= h($path) ?></code><br>
+    网站根目录：<code><?= h($doc) ?></code><br>
+    <code>.db</code> 就是个普通文件 —— 放在网站目录下，
+    <strong>谁把网址猜对了就能把整个数据库下载走</strong>，不需要登录，
+    日志里也只是一次普通的静态文件请求，你不会发现。
+    <br>
+    改法：在 <code>config.php</code> 里把 <code>store_path</code> 指到
+    <strong>网站根目录之外</strong>的路径，然后把已有的
+    <code>app.db</code>（连同 <code>app.db-wal</code>、<code>app.db-shm</code>，有就一起）
+    移过去，最后删掉旧目录。详见 README「七之三 · 数据存哪」。</p>
+    <?php
+}
+
 /** 金额格式化 */
 function money($v): string
 {
@@ -63,7 +138,7 @@ function pageHeader(string $title, string $active): void
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1e2836">
 <title><?= h($title) ?></title>
-<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="<?= h(asset('assets/app.css')) ?>">
 </head>
 <body>
 <header class="topbar">
@@ -80,6 +155,8 @@ function pageHeader(string $title, string $active): void
       'compare' => ['compare.php', '期间对比',     '对比'],
       'dish'    => ['dish.php',    '菜品点单统计', '菜品'],
       'station' => ['station.php', '岗位单量排名', '岗位'],
+      'meat'    => ['meat.php',    '肉类采购',     '采购'],
+      'stock'   => ['stock.php',   '库存盘点',     '库存'],
   ];
   ?>
   <nav class="tabs">

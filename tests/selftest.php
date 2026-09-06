@@ -48,6 +48,221 @@ function throws(string $name, callable $fn): void
 }
 
 // =====================================================================
+echo "\n【0】铁律（见 注意事项.md）\n";
+// 这一组把「注意事项.md」里能机械检查的规矩变成测试。
+// 光写文档是会被忘的，写成测试才拦得住。
+// =====================================================================
+
+$ROOT = __DIR__ . '/..';
+$phpFiles = [];
+foreach (['', '/lib', '/tests'] as $dir) {
+    foreach ((array) glob($ROOT . $dir . '/*.php') as $f) {
+        $phpFiles[] = $f;
+    }
+}
+ok('扫到了程序文件', count($phpFiles) >= 15);
+
+// ---- 铁律一 & 二：数据库出口只有两个，各管各的 ----
+//   lib/db.php    → POS 主库（MySQL），只读
+//   lib/store.php → 自有数据（SQLite），可写
+// 除这两个文件，任何地方都不许自己建连接。
+$dbOut = [];
+foreach ($phpFiles as $f) {
+    $base = basename($f);
+    if (in_array($base, ['db.php', 'store.php', 'env.php'], true)) {
+        continue;                       // 两个出口 + env.php（只做扩展探测）
+    }
+    $src = (string) file_get_contents($f);
+    if (preg_match('/\bnew\s+(PDO|mysqli)\b|\bmysqli_connect\s*\(/i', $src)) {
+        $dbOut[] = $base;
+    }
+}
+eq('除两个出口外没有第三个数据库连接', $dbOut, []);
+// 主库出口不许碰 SQLite，自有出口不许碰 MySQL —— 两边物理隔离
+$storeSrc = (string) file_get_contents($ROOT . '/lib/store.php');
+ok('Store 只连 SQLite', strpos($storeSrc, "'sqlite:'") !== false
+   && !preg_match('/new\s+mysqli|mysqli_connect|mysql:host/i', $storeSrc));
+ok('Store 会拒绝非 sqlite 的 DSN', strpos($storeSrc, 'Store 只允许连接 SQLite') !== false);
+ok('数据文件默认放在程序目录之外', strpos($storeSrc, 'dirname(__DIR__, 2)') !== false);
+// 跨源不许 JOIN：Store 的 SQL 里不许出现任何主库表名
+foreach (['history_order_head', 'history_order_detail', 'order_head', 'order_detail',
+          'menu_item', 'print_class'] as $posTable) {
+    ok("Store 不碰主库的表 {$posTable}", strpos($storeSrc, $posTable) === false);
+}
+
+// ---- 铁律一：Db 不许提供写入口 ----
+$dbSrc = (string) file_get_contents($ROOT . '/lib/db.php');
+foreach (['exec', 'beginTransaction', 'multi_query', 'prepare_multi'] as $bad) {
+    ok("Db 没有暴露 {$bad}()", !preg_match('/function\s+' . $bad . '\s*\(/i', $dbSrc));
+}
+ok('Db 只对外提供 select/selectOne',
+   preg_match('/public static function select\s*\(/', $dbSrc) === 1
+   && preg_match('/public static function selectOne\s*\(/', $dbSrc) === 1);
+ok('多语句执行被显式关掉', strpos($dbSrc, 'MYSQL_ATTR_MULTI_STATEMENTS') !== false);
+ok('每条 SQL 都要过只读检查', substr_count($dbSrc, 'assertReadOnly') >= 2);
+
+// ---- 铁律二：写语句只允许出现在 Store 那一侧 ----
+// 规矩不是「全程序不许有写语句」（自有数据当然要写），而是写语句只能待在
+// 这两个文件里。别的地方一旦冒出 INSERT/UPDATE/CREATE TABLE，就说明有人
+// 把写操作接到了主库那条线上。
+$WRITE_OK = ['store.php', 'meat.php', 'stock.php'];
+foreach ($phpFiles as $f) {
+    $base = basename($f);
+    if (in_array($base, ['selftest.php', 'db.php'], true)) {
+        continue;                       // 自检脚本本身要写这些字符串来做测试
+    }
+    if (in_array($base, $WRITE_OK, true)) {
+        continue;                       // 自有存储那一侧，允许写
+    }
+    $src = (string) file_get_contents($f);
+    ok("{$base} 不含写库语句",
+       !preg_match('/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+TABLE)\b/i', $src));
+}
+// 允许写的那两个文件，反过来必须完全不认识主库
+foreach ($WRITE_OK as $base) {
+    $src = (string) file_get_contents($ROOT . '/lib/' . $base);
+    ok("{$base} 不引用主库的 Db::select", strpos($src, 'Db::select') === false);
+}
+ok('Db 不引用 Store', strpos($dbSrc, 'Store::') === false);
+
+// ---- 铁律三：功能默认值必须在 settings.php，config.php 不许重复 ----
+$defaults = require $ROOT . '/lib/settings.php';
+$shipCfg  = require $ROOT . '/config.php';
+$dup = array_intersect(array_keys($defaults), array_keys($shipCfg));
+eq('随包 config.php 不重复功能参数', $dup, []);
+// 每个页面读到的功能参数，都必须在 settings.php 里有默认值
+$usedKeys = [];
+foreach (['/index.php', '/dish.php', '/station.php', '/open.php', '/compare.php',
+          '/lib/biz.php', '/lib/ack.php', '/lib/report.php', '/lib/view.php'] as $f) {
+    // 只认 $cfg['x'] 和 config()['x']。用单引号字符串写正则，双引号里 \$ 的转义
+    // 极易写错 —— 这条断言第一版就写成了 /\\$cfg/（$cfg 前面多一个反斜杠），
+    // 永远匹配不到任何东西，等于没检查。用 . 匹配引号，省掉一层转义。
+    if (preg_match_all('/\\$cfg\\[.([a-z_]+).\\]|config\\(\\)\\[.([a-z_]+).\\]/',
+                       (string) file_get_contents($ROOT . $f), $m)) {
+        foreach (array_merge($m[1], $m[2]) as $k) {
+            if ($k !== '') { $usedKeys[$k] = true; }
+        }
+    }
+}
+$siteOnly = ['host', 'port', 'dbname', 'user', 'pass', 'charset', 'password'];
+$missing = array_diff(array_keys($usedKeys), array_keys($defaults), $siteOnly);
+eq('页面用到的功能参数都在 settings.php 里有默认值', array_values($missing), []);
+
+// ---- 铁律四：时区必须显式设定 ----
+ok('settings.php 有 timezone', array_key_exists('timezone', $defaults));
+ok('读配置时会套用时区', strpos($dbSrc, 'date_default_timezone_set') !== false);
+
+// ---- 铁律五：不许 JOIN ----
+// 真去生成一遍 SQL 来查，不能写成 ok(..., true) 那种恒真的占位断言
+[$jf, $jt] = Biz::range('2026-01-01', '2026-01-05');
+$joinSqls = [
+    '营业额'   => Biz::buildSalesSql($jf, $jt, 'history_order_head')[0],
+    '菜品汇总' => Biz::buildDishTotalsSql($jf, $jt, 'history_order_detail')[0],
+    '单菜品'   => Biz::buildDishByDaySql($jf, $jt, 'history_order_detail', 431)[0],
+    '岗位单量' => Biz::buildStationSql($jf, $jt, 'history_order_detail', [1 => 11])[0],
+    '开台列表' => Biz::buildOpenTablesSql(true)[0],
+    '套餐酒水' => Biz::buildComboCountSql([1], [1890], [431])[0],
+];
+foreach ($joinSqls as $label => $sqlText) {
+    ok("{$label} SQL 不含 JOIN", !preg_match('/\bjoin\b/i', $sqlText));
+    ok("{$label} SQL 未对时间列套函数",
+       !preg_match('/WHERE[^)]*\b(DATE|TIME|YEAR|MONTH)\s*\(\s*order_(start_)?time/i', $sqlText));
+}
+
+// ---- 铁律七：界面不能只靠颜色 ----
+$cmpSrc0 = (string) file_get_contents($ROOT . '/compare.php');
+ok('涨跌除颜色外还有箭头',
+   strpos($cmpSrc0, '▲') !== false && strpos($cmpSrc0, '▼') !== false);
+$cssSrc0 = (string) file_get_contents($ROOT . '/assets/app.css');
+ok('输入框字号不低于 16px',
+   preg_match('/input\[type=date\][^{]*\{[^}]*font-size:16px/s', $cssSrc0) === 1);
+
+// ---- 数据文件落在网站可访问目录时必须报警 ----
+// 铁律二第 4 条以前只写在文档里，实际部署踩过：宝塔那类面板的目录是
+//   /www/wwwroot/站点/www/wwwroot/   ← 网站根
+//   /www/wwwroot/站点/www/           ← 这层才在外面
+// 程序放进网站根下面一层时，默认的「程序目录上一级」正好还在网站根里。
+// 文档拦不住这种事，得让程序自己在页面上喊出来。
+require_once $ROOT . '/lib/store.php';
+$docSaved = $_SERVER['DOCUMENT_ROOT'] ?? null;
+$tmpRoot  = sys_get_temp_dir() . '/selftest_doc_' . getmypid();
+@mkdir($tmpRoot . '/sub/data', 0777, true);
+@mkdir(dirname($tmpRoot) . '/outside_' . getmypid(), 0777, true);
+
+$_SERVER['DOCUMENT_ROOT'] = $tmpRoot;
+Db::forTests(['store_path' => $tmpRoot . '/sub/data/app.db']);
+eq('数据文件在网站根里面 → 报警', Store::exposedUnder(), realpath($tmpRoot));
+Db::forTests(['store_path' => $tmpRoot . '/data/app.db']);
+@mkdir($tmpRoot . '/data', 0777, true);
+eq('就在网站根那一层 → 也报警', Store::exposedUnder(), realpath($tmpRoot));
+Db::forTests(['store_path' => dirname($tmpRoot) . '/outside_' . getmypid() . '/app.db']);
+eq('放在网站根外面 → 不报警', Store::exposedUnder(), null);
+// 名字前缀相同但不是子目录，不能误判（/var/www 与 /var/wwwdata）
+@mkdir($tmpRoot . 'x/data', 0777, true);
+Db::forTests(['store_path' => $tmpRoot . 'x/data/app.db']);
+eq('只是名字前缀像，不算在里面', Store::exposedUnder(), null);
+// 命令行等场景取不到网站根目录时不许误报
+unset($_SERVER['DOCUMENT_ROOT']);
+Db::forTests(['store_path' => $tmpRoot . '/sub/data/app.db']);
+eq('取不到网站根目录时不误报', Store::exposedUnder(), null);
+
+if ($docSaved !== null) { $_SERVER['DOCUMENT_ROOT'] = $docSaved; }
+Db::forTests(null);
+foreach ([$tmpRoot . '/sub/data', $tmpRoot . '/sub', $tmpRoot . '/data', $tmpRoot,
+          $tmpRoot . 'x/data', $tmpRoot . 'x',
+          dirname($tmpRoot) . '/outside_' . getmypid()] as $d) {
+    @rmdir($d);
+}
+
+// 四个用到自有存储的页面都要报警 —— 漏掉一页，部署的人就可能一直以为没事
+foreach (['meat.php', 'meatweek.php', 'stock.php', 'stocknow.php'] as $pg) {
+    ok("{$pg} 会提示数据文件放错位置",
+       strpos((string) file_get_contents($ROOT . '/' . $pg), 'storeBanner()') !== false);
+}
+ok('警告里写清了怎么改',
+   strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'store_path') !== false);
+// WAL 模式下还有两个附属文件，只搬走主文件会丢最近的写入
+ok('警告里提醒了 -wal / -shm 也要一起搬',
+   strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'app.db-wal') !== false);
+
+// ---- 静态文件必须带缓存版本号 ----
+// 少了它，用户浏览器会一直用缓存里的旧 app.css：新控件完全没样式，页面看着就是坏的，
+// 而服务器端一点都看不出来。所有引用都得走 asset()，不许直接写死路径。
+foreach ($phpFiles as $f) {
+    $base = basename($f);
+    if (in_array($base, ['selftest.php', 'view.php'], true)) {
+        continue;                       // 自检本身和 asset() 的定义处要写这个字符串
+    }
+    $src = (string) file_get_contents($f);
+    ok("{$base} 的静态文件引用带版本号",
+       preg_match('/(?:href|src)="assets\//', $src) === 0);
+}
+require_once $ROOT . '/lib/view.php';
+foreach (['assets/app.css', 'assets/app.js'] as $a) {
+    ok("asset('{$a}') 带上了 ?v=", strpos(asset($a), $a . '?v=') === 0);
+}
+// 文件读不到时也不能退回「不带版本号」—— 那等于这道防线在最需要的时候失效
+ok('文件不存在时仍然带版本号',
+   strpos(asset('assets/这个文件不存在.css'), '?v=') !== false);
+ok('asset_version 有默认值',
+   array_key_exists('asset_version', (array) require $ROOT . '/lib/settings.php'));
+
+// ---- 铁律八：手机与桌面共用同一个格式化函数 ----
+$openSrc0 = (string) file_get_contents($ROOT . '/open.php');
+ok('开台核对两套视图共用 $fmt',
+   substr_count($openSrc0, '$fmt($r)') >= 2 && substr_count($openSrc0, '$fmt = static function') === 1);
+
+// ---- 注意事项文档本身要在 ----
+ok('注意事项.md 存在', is_file($ROOT . '/注意事项.md'));
+$rules = (string) file_get_contents($ROOT . '/注意事项.md');
+foreach (['绝对不碰主数据库', '自有数据和主库彻底分开', '配置分两层',
+          '时区必须和 POS 一致', '每次只统计一张表', '不能只靠颜色'] as $kw) {
+    ok("注意事项.md 写了「{$kw}」", strpos($rules, $kw) !== false);
+}
+ok('README 指向注意事项.md',
+   strpos((string) file_get_contents($ROOT . '/README.md'), '注意事项.md') !== false);
+
+// =====================================================================
 echo "\n【1】只读防线\n";
 // =====================================================================
 
@@ -529,6 +744,442 @@ $byEat = [];
 foreach ($otEat['rows'] as $r) { $byEat[$r['id']] = $r; }
 eq('按 eat_type 也能判为免核对', $byEat[5]['state'], Report::OPEN_SKIP);
 eq('按 eat_type 免核对后问题台同样减一', $otEat['sum']['problem'], 3);
+
+// =====================================================================
+echo "\n【2e2a】肉类采购记录（自有 SQLite）\n";
+// =====================================================================
+
+require_once __DIR__ . '/../lib/meat.php';
+Store::useMemoryForTests();          // 用内存库，不碰真实数据文件
+
+// 日期一律相对今天算。写死日期是个陷阱：写的时候是过去，跑到那天之后
+// 就成了「未来」，被校验拦下，测试自己就红了（这段第一版就踩了）。
+$dAgo = static fn(int $n) => date('Y-m-d', strtotime("-{$n} day"));
+
+// ---- 校验：日期与品类必填 ----
+$base = ['purchase_date' => $dAgo(9), 'kind' => 'salmon', 'unit_count' => '3',
+         'unit_type' => 'piece'];
+[$c, $e] = Meat::validate($base);
+eq('到货只填条数 → 通过', $e, []);
+eq('清洗后日期规范化', $c['purchase_date'], $dAgo(9));
+eq('没填重量就是 null，不是 0', $c['weight_kg'], null);
+
+[, $e] = Meat::validate(['kind' => 'salmon', 'weight_kg' => '5']);
+ok('缺日期被拒', isset($e['purchase_date']));
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'weight_kg' => '5']);
+ok('缺品类被拒', isset($e['kind']));
+[, $e] = Meat::validate(['purchase_date' => 'abc', 'kind' => 'salmon', 'weight_kg' => '5']);
+ok('日期垃圾串被拒', isset($e['purchase_date']));
+[, $e] = Meat::validate(['purchase_date' => date('Y-m-d', strtotime('+30 day')),
+                         'kind' => 'salmon', 'weight_kg' => '5']);
+ok('未来日期被拒（多半是年份打错）', isset($e['purchase_date']));
+[, $e] = Meat::validate(['purchase_date' => date('Y-m-d', strtotime('-400 day')),
+                         'kind' => 'salmon', 'weight_kg' => '5']);
+eq('往回补录不受限（月底补录、翻旧发票）', $e, []);
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => '不存在', 'weight_kg' => '5']);
+ok('品类不在清单里被拒', isset($e['kind']));
+
+// ---- 重量与件数：至少一个 ----
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon']);
+ok('重量件数都空被拒', isset($e['weight_kg']));
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon',
+                         'weight_kg' => '', 'unit_count' => '']);
+ok('都填空串也被拒', isset($e['weight_kg']));
+[$c, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon', 'weight_kg' => '8.5']);
+eq('只填重量 → 通过', $e, []);
+eq('只填重量时件数为 null', $c['unit_count'], null);
+eq('只填重量时不带单位', $c['unit_type'], null);
+[$c, $e] = Meat::validate(array_merge($base, ['weight_kg' => '12.6']));
+eq('两个都填 → 通过', $e, []);
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon', 'weight_kg' => '-1']);
+ok('负重量被拒', isset($e['weight_kg']));
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon', 'weight_kg' => '0']);
+ok('0 重量被拒', isset($e['weight_kg']));
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon', 'unit_count' => '3']);
+ok('填了件数没选单位被拒', isset($e['unit_type']));
+
+// 西语写法：1,5 应当认成 1.5
+[$c, ] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon', 'weight_kg' => '12,6']);
+eq('逗号小数被认成 12.6', $c['weight_kg'], 12.6);
+[$c, ] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon', 'weight_kg' => ' 8.5 ']);
+eq('前后空格被去掉', $c['weight_kg'], 8.5);
+
+// ---- 单价口径 ----
+[, $e] = Meat::validate(array_merge($base, ['unit_price' => '10']));
+ok('填了单价没选口径被拒', isset($e['price_basis']));
+[, $e] = Meat::validate(array_merge($base, ['unit_price' => '10', 'price_basis' => 'kg']));
+ok('按公斤计价却没填重量被拒', isset($e['price_basis']));
+[, $e] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'salmon',
+                         'weight_kg' => '10', 'unit_price' => '8', 'price_basis' => 'unit']);
+ok('按件计价却没填件数被拒', isset($e['price_basis']));
+[$c, $e] = Meat::validate(array_merge($base, ['weight_kg' => '12', 'unit_price' => '10',
+                                              'price_basis' => 'kg']));
+eq('按公斤计价 + 有重量 → 通过', $e, []);
+eq('推算总价 = 单价 × 重量', Meat::derivedTotal($c), 120.0);
+[$c, ] = Meat::validate(array_merge($base, ['unit_price' => '40', 'price_basis' => 'unit']));
+eq('推算总价 = 单价 × 件数', Meat::derivedTotal($c), 120.0);
+eq('没填单价时算不出总价', Meat::derivedTotal(['unit_price' => null]), null);
+
+// ---- 待补发票 ----
+ok('缺重量算待补发票', Meat::needsInvoice(['weight_kg' => null, 'total_price' => 10]));
+ok('缺总价算待补发票', Meat::needsInvoice(['weight_kg' => 5, 'total_price' => null]));
+ok('都齐了就不是待补', !Meat::needsInvoice(['weight_kg' => 5, 'total_price' => 10]));
+
+// ---- 增删改与留痕 ----
+[$c, ] = Meat::validate($base);
+$id = Meat::create($c);
+ok('新增成功', $id > 0);
+eq('新增后能查到', Meat::find($id)['kind'], 'salmon');
+eq('新增记了一条留痕', count(Meat::history($id)), 1);
+
+[$c2, ] = Meat::validate(array_merge($base, ['weight_kg' => '12.6', 'total_price' => '151.2']));
+ok('补齐发票信息', Meat::update($id, $c2));
+eq('补齐后重量正确', (float) Meat::find($id)['weight_kg'], 12.6);
+ok('补齐后不再是待补发票', !Meat::needsInvoice(Meat::find($id)));
+eq('修改也留了痕', count(Meat::history($id)), 2);
+
+ok('软删除成功', Meat::softDelete($id));
+ok('软删后数据还在', Meat::find($id) !== null);
+ok('软删后有作废时间', Meat::find($id)['deleted_at'] !== null);
+ok('重复软删返回 false', !Meat::softDelete($id));
+eq('默认列表不含已作废', count(Meat::listRows()), 0);
+eq('勾了才看得到已作废', count(Meat::listRows(['with_deleted' => 1])), 1);
+ok('能恢复', Meat::restore($id));
+ok('恢复后不再是作废态', Meat::find($id)['deleted_at'] === null);
+eq('作废与恢复都留了痕', count(Meat::history($id)), 4);
+ok('改不存在的记录返回 false', !Meat::update(999999, $c2));
+
+// ---- 平均条重：只用两个都填了的记录算 ----
+Store::useMemoryForTests();
+foreach ([[$dAgo(9), 12.0], [$dAgo(8), 13.5], [$dAgo(7), 11.4],
+          [$dAgo(6), 30.0]] as [$d, $kg]) {
+    [$cc, ] = Meat::validate(['purchase_date' => $d, 'kind' => 'salmon',
+                              'weight_kg' => (string) $kg, 'unit_count' => '3',
+                              'unit_type' => 'piece']);
+    Meat::create($cc);
+}
+// 只填条数的那条不该参与算系数
+[$cc, ] = Meat::validate(['purchase_date' => $dAgo(5), 'kind' => 'salmon',
+                          'unit_count' => '2', 'unit_type' => 'piece']);
+$estId = Meat::create($cc);
+
+$uw = Meat::unitWeights();
+ok('算出了三文鱼的条重', isset($uw['salmon']));
+eq('样本数只算两个都填了的', $uw['salmon']['n'], 4);
+// 每条 = 4.0 / 4.5 / 3.8 / 10.0 → 中位数 (4.0+4.5)/2 = 4.25
+eq('用中位数，不被 30kg 那一批带跑', round($uw['salmon']['per'], 2), 4.25);
+eq('范围下限', round($uw['salmon']['min'], 1), 3.8);
+eq('范围上限', round($uw['salmon']['max'], 1), 10.0);
+
+[$w, $est] = Meat::statWeight(Meat::find($estId), $uw);
+ok('缺重量的记录被估算', $est);
+eq('估算值 = 件数 × 中位数', round((float) $w, 2), 8.5);
+[$w2, $est2] = Meat::statWeight(Meat::find(1), $uw);
+ok('有实测重量的不估算', !$est2);
+eq('实测重量原样返回', $w2, 12.0);
+
+// 样本不足就不估算 —— 宁可报「缺重量」也不编数字
+Store::useMemoryForTests();
+[$cc, ] = Meat::validate(['purchase_date' => $dAgo(9), 'kind' => 'beef',
+                          'weight_kg' => '10', 'unit_count' => '2', 'unit_type' => 'pack']);
+Meat::create($cc);
+[$cc, ] = Meat::validate(['purchase_date' => $dAgo(8), 'kind' => 'beef',
+                          'unit_count' => '3', 'unit_type' => 'pack']);
+$few = Meat::create($cc);
+$uw2 = Meat::unitWeights();
+eq('样本只有 1 条', $uw2['beef']['n'], 1);
+[$w3, $est3] = Meat::statWeight(Meat::find($few), $uw2);
+eq('样本不足时不估算', $w3, null);
+ok('样本不足时也不标成估算', !$est3);
+ok('阈值是 3 条', Meat::MIN_SAMPLES === 3);
+
+// 单位对不上不估算（按「条」算的系数不能拿去折算「包」）
+Store::useMemoryForTests();
+foreach ([$dAgo(9), $dAgo(8), $dAgo(7)] as $d) {
+    [$cc, ] = Meat::validate(['purchase_date' => $d, 'kind' => 'salmon',
+                              'weight_kg' => '12', 'unit_count' => '3', 'unit_type' => 'piece']);
+    Meat::create($cc);
+}
+[$cc, ] = Meat::validate(['purchase_date' => $dAgo(6), 'kind' => 'salmon',
+                          'unit_count' => '2', 'unit_type' => 'pack']);
+$mix = Meat::create($cc);
+[$w4, ] = Meat::statWeight(Meat::find($mix), Meat::unitWeights());
+eq('「包」不能拿「条」的系数折算', $w4, null);
+
+// ---- 筛选 ----
+Store::useMemoryForTests();
+foreach ([[$dAgo(20), 'salmon'], [$dAgo(10), 'beef'], [$dAgo(2), 'salmon']] as [$d, $k]) {
+    [$cc, ] = Meat::validate(['purchase_date' => $d, 'kind' => $k, 'weight_kg' => '5']);
+    Meat::create($cc);
+}
+eq('按日期范围筛', count(Meat::listRows(['from' => $dAgo(5), 'to' => date('Y-m-d', strtotime('+5 day'))])), 1);
+eq('按品类筛', count(Meat::listRows(['kind' => 'salmon'])), 2);
+eq('列表按日期倒序', Meat::listRows()[0]['purchase_date'], $dAgo(2));
+[$cc, ] = Meat::validate(['purchase_date' => $dAgo(1), 'kind' => 'beef', 'unit_count' => '2',
+                          'unit_type' => 'pack']);
+Meat::create($cc);
+eq('只看待补发票', count(Meat::listRows(['only_pending' => 1])), 4);
+
+// ---- 页面与铁律 ----
+$meatSrc = (string) file_get_contents(__DIR__ . '/../meat.php');
+ok('录入页要求登录', strpos($meatSrc, 'Auth::requireLogin()') !== false);
+ok('写操作走 POST + CSRF', strpos($meatSrc, 'Auth::csrfValid') !== false);
+ok('提交后跳转，避免刷新重复提交', strpos($meatSrc, "header('Location: '") !== false);
+ok('作废前要二次确认', strpos($meatSrc, 'onsubmit="return confirm(') !== false);
+ok('页面不碰主库', strpos($meatSrc, 'Db::select') === false);
+ok('数据文件路径显示给用户看', strpos($meatSrc, 'Store::path()') !== false);
+ok('数据目录不可写时给出明确提示', strpos($meatSrc, 'store_path') !== false);
+// Report::dow 用到了，就必须 require —— 第一版漏了，页面渲染到一半直接 fatal
+ok('用到 Report 就 require 了 report.php',
+   strpos($meatSrc, 'Report::') === false
+   || strpos($meatSrc, "require_once __DIR__ . '/lib/report.php'") !== false);
+
+// =====================================================================
+echo "\n【2e2a2】肉类周报表的聚合\n";
+// =====================================================================
+
+// ---- 周的边界：周一到周日（用户选的），跨年也不能错 ----
+eq('周日归上一周', Meat::weekKey('2026-09-06'), '2026-36');
+eq('周一开新的一周', Meat::weekKey('2026-09-07'), '2026-37');
+eq('周的起止是周一到周日', Meat::weekRange('2026-36'), ['2026-08-31', '2026-09-06']);
+// 跨年最容易写错：2021-01-01 是周五，属于 2020 年的第 53 周
+eq('元旦可能属于上一年的最后一周', Meat::weekKey('2021-01-01'), '2020-53');
+eq('跨年周的起止跨两个年份', Meat::weekRange('2020-53'), ['2020-12-28', '2021-01-03']);
+eq('日期无法解析时返回空串', Meat::weekKey('乱写'), '');
+
+$wk = Meat::recentWeeks(4, '2026-09-06');
+eq('取近 4 周就是 4 个', count($wk), 4);
+eq('最后一个是本周', $wk[3], '2026-36');
+eq('第一个是三周前', $wk[0], '2026-33');
+
+// ---- 按周汇总：实测重量和估算重量必须分开存 ----
+$uwk = ['salmon' => ['unit' => 'piece', 'per' => 4.0, 'n' => 5, 'min' => 3.5, 'max' => 4.5]];
+$rowsW = [
+    // 同一周两笔三文鱼，一笔实测一笔只有条数
+    ['purchase_date' => '2026-08-31', 'kind' => 'salmon', 'weight_kg' => 10.0,
+     'unit_count' => null, 'unit_type' => null, 'total_price' => 150.0, 'deleted_at' => null],
+    ['purchase_date' => '2026-09-02', 'kind' => 'salmon', 'weight_kg' => null,
+     'unit_count' => 2.0, 'unit_type' => 'piece', 'total_price' => null, 'deleted_at' => null],
+    // 牛肉：没有条重样本，缺重量 → 只能记成「缺重量」，不许编数字
+    ['purchase_date' => '2026-09-02', 'kind' => 'beef', 'weight_kg' => null,
+     'unit_count' => 1.0, 'unit_type' => 'pack', 'total_price' => 40.0, 'deleted_at' => null],
+    // 上一周
+    ['purchase_date' => '2026-08-25', 'kind' => 'salmon', 'weight_kg' => 6.0,
+     'unit_count' => null, 'unit_type' => null, 'total_price' => 90.0, 'deleted_at' => null],
+    // 已作废的不该进统计
+    ['purchase_date' => '2026-08-25', 'kind' => 'salmon', 'weight_kg' => 99.0,
+     'unit_count' => null, 'unit_type' => null, 'total_price' => 999.0, 'deleted_at' => '2026-08-26'],
+];
+$agg = Meat::weekly($rowsW, $uwk);
+eq('归成两周', count($agg), 2);
+eq('周按时间正序', array_keys($agg), ['2026-35', '2026-36']);
+eq('实测重量单独算', $agg['2026-36']['kg'], 10.0);
+eq('估算重量单独算（2 条 × 4kg）', $agg['2026-36']['kg_est'], 8.0);
+eq('记下有几笔是估算的', $agg['2026-36']['est_rows'], 1);
+eq('缺重量的单独计数', $agg['2026-36']['no_kg'], 1);
+eq('缺总价的单独计数', $agg['2026-36']['no_money'], 1);
+eq('金额只算填了总价的', $agg['2026-36']['money'], 190.0);
+eq('按品类也分开', round($agg['2026-36']['kinds']['salmon']['kg_est'], 1), 8.0);
+eq('作废的不进统计', $agg['2026-35']['kg'], 6.0);
+eq('作废的金额也不进', $agg['2026-35']['money'], 90.0);
+
+// ---- 滚动平均 ----
+$roll = Meat::rolling(['a' => 10.0, 'b' => 20.0, 'c' => 30.0, 'd' => 40.0, 'e' => 50.0], 3);
+eq('不足窗口时用已有的几周', array_values($roll), [10.0, 15.0, 20.0, 30.0, 40.0]);
+// null = 那一周没数据。当成 0 会把均值拉低，下一周就成了假的「暴涨」
+$rollN = Meat::rolling(['a' => 10.0, 'b' => null, 'c' => 20.0], 3);
+eq('没数据的周被跳过而不是当 0', $rollN['c'], 15.0);
+eq('窗口内全没数据就返回 null', Meat::rolling(['a' => null, 'b' => null], 2)['b'], null);
+
+// ---- 页面：两边分别查、内存里合并，不许 JOIN ----
+$mwSrc = (string) file_get_contents(__DIR__ . '/../meatweek.php');
+ok('周报表要求登录', strpos($mwSrc, 'Auth::requireLogin()') !== false);
+ok('周报表不写任何东西', preg_match('/\b(INSERT|UPDATE|DELETE|CREATE)\b/i', $mwSrc) === 0);
+ok('自有数据走 Store', strpos($mwSrc, 'Meat::listRows') !== false);
+ok('主库只走 Biz 的只读查询', strpos($mwSrc, 'Biz::salesByDay') !== false);
+// 页面自己一句 SQL 都不写，查询全在 Biz（主库只读）和 Meat（自有库）里 ——
+// 没有 SQL 就没有把两边写进同一条语句的机会
+ok('周报表页自己不拼 SQL', strpos($mwSrc, 'SELECT ') === false);
+// 主库挂了不该连采购数据一起看不见 —— 采购是自有的
+ok('主库失败被单独捕获', strpos($mwSrc, 'catch (Throwable $e)') !== false
+   && strpos($mwSrc, '$posErr') !== false);
+ok('数字列表头带 class="n"', preg_match('/<th>(合计 kg|采购额|人均 g|占营业额)/u', $mwSrc) === 0);
+// 采购 ≠ 消耗：这句必须留在页面上，不然看的人会把进货节奏当成浪费
+ok('页面写明统计的是采购量不是消耗量',
+   strpos($mwSrc, '不是「实际消耗量」') !== false);
+
+// =====================================================================
+echo "\n【2e2c】库存（存入 / 盘点 / 用量推算）\n";
+// =====================================================================
+
+require_once __DIR__ . '/../lib/stock.php';
+Store::useMemoryForTests();
+
+$sIn = static function (string $d, string $t, string $item, string $kind, string $q,
+                        ?string $moment = null) {
+    [$c, $e] = Stock::validate(['happened_date' => $d, 'happened_time' => $t, 'item' => $item,
+                                'move_kind' => $kind, 'qty' => $q, 'moment' => $moment]);
+    if ($e) {
+        throw new RuntimeException('测试数据自己就没过校验：' . json_encode($e, JSON_UNESCAPED_UNICODE));
+    }
+    return Stock::create($c);
+};
+
+// ---- 校验 ----
+$base = ['happened_date' => $dAgo(1), 'happened_time' => '23:30',
+         'item' => 'salmon_fillet', 'move_kind' => 'count', 'qty' => '4'];
+[$c, $e] = Stock::validate($base);
+eq('完整的一条能过', $e, []);
+eq('日期和时间合成时刻', $c['happened_at'], $dAgo(1) . ' 23:30');
+
+// 动作故意不给默认值：存入是「加上去」，盘点是「就是这么多」，选反了用量算错方向
+[, $e] = Stock::validate(array_merge($base, ['move_kind' => '']));
+ok('不选动作被拒', isset($e['move_kind']));
+// 传空串和【压根没传】是两回事：给个默认值的话，表单少了这个字段就会
+// 悄悄按默认动作存下去，用量整段算反还没人知道
+$noKind = $base;
+unset($noKind['move_kind']);
+[, $e] = Stock::validate($noKind);
+ok('压根没传动作也被拒（不许有默认动作）', isset($e['move_kind']));
+[, $e] = Stock::validate(array_merge($base, ['move_kind' => 'out']));
+ok('乱造的动作被拒', isset($e['move_kind']));
+
+[, $e] = Stock::validate(array_merge($base, ['happened_time' => '']));
+ok('不填时间被拒（一天可能盘好几次）', isset($e['happened_time']));
+[, $e] = Stock::validate(array_merge($base, ['happened_time' => '25:00']));
+ok('小时超范围被拒', isset($e['happened_time']));
+[, $e] = Stock::validate(array_merge($base, ['happened_time' => '12:70']));
+ok('分钟超范围被拒', isset($e['happened_time']));
+[$c, ] = Stock::validate(array_merge($base, ['happened_time' => '9:05']));
+eq('个位小时补零', $c['happened_at'], $dAgo(1) . ' 09:05');
+
+[, $e] = Stock::validate(array_merge($base,
+    ['happened_date' => date('Y-m-d', strtotime('+30 day'))]));
+ok('未来日期被拒', isset($e['happened_date']));
+[, $e] = Stock::validate(array_merge($base, ['item' => '不存在']));
+ok('品类不在清单里被拒', isset($e['item']));
+[, $e] = Stock::validate(array_merge($base, ['qty' => '']));
+ok('不填数量被拒', isset($e['qty']));
+[, $e] = Stock::validate(array_merge($base, ['qty' => '-1']));
+ok('负数量被拒', isset($e['qty']));
+// 盘点 0 是有意义的（数完发现空了），存入 0 等于什么都没做
+[, $e] = Stock::validate(array_merge($base, ['qty' => '0']));
+eq('盘点 0 可以', $e, []);
+[, $e] = Stock::validate(array_merge($base, ['move_kind' => 'in', 'qty' => '0']));
+ok('存入 0 被拒', isset($e['qty']));
+[$c, ] = Stock::validate(array_merge($base, ['qty' => '2,5']));
+eq('西语逗号小数被识别', $c['qty'], 2.5);
+[, $e] = Stock::validate(array_merge($base, ['moment' => '不存在的时点']));
+ok('时点不在清单里被拒', isset($e['moment']));
+
+// ---- 用户给的那个例子：4 箱 → 存入 3 → 盘点 5 → 用掉 2 ----
+Store::useMemoryForTests();
+$sIn('2026-09-05', '23:30', 'salmon_fillet', 'count', '4', 'dinner_end');
+$sIn('2026-09-06', '11:00', 'salmon_fillet', 'in',    '3');
+$sIn('2026-09-06', '23:30', 'salmon_fillet', 'count', '5', 'dinner_end');
+$ps = Stock::periods(Stock::seriesFor('salmon_fillet'));
+eq('两次盘点之间算一段', count($ps), 1);
+eq('取出 = 上次盘点 + 期间存入 − 本次盘点', $ps[0]['used'], 2.0);
+eq('段的起点是上次盘点', $ps[0]['from'], '2026-09-05 23:30');
+eq('段的终点是本次盘点', $ps[0]['to'], '2026-09-06 23:30');
+eq('段长 24 小时', round($ps[0]['hours']), 24);
+ok('用量为正，不算漏记', !$ps[0]['negative']);
+
+$cur = Stock::current()['salmon_fillet'];
+eq('最近盘点数', $cur['last_qty'], 5.0);
+eq('盘点后没再存入', $cur['since_in'], 0.0);
+eq('账面 = 最近盘点 + 之后存入', $cur['book'], 5.0);
+eq('单位跟着品类走', $cur['unit'], '箱');
+
+// 盘点之后又存入，账面要跟着涨（但那只是上限，之后用掉的没人记）
+$sIn('2026-09-07', '11:00', 'salmon_fillet', 'in', '2');
+$cur = Stock::current()['salmon_fillet'];
+eq('盘点后的存入计入账面', $cur['since_in'], 2.0);
+eq('账面上限 = 5 + 2', $cur['book'], 7.0);
+eq('还是只算了一段（没有新盘点）', count($cur['periods']), 1);
+
+// ---- 一天盘好几次 → 能算出餐期用量 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '11:00', 'beef', 'count', '10', 'arrive');
+$sIn('2026-09-06', '16:30', 'beef', 'count', '7',  'lunch_end');
+$sIn('2026-09-06', '19:30', 'beef', 'in',    '5');
+$sIn('2026-09-06', '23:30', 'beef', 'count', '4',  'dinner_end');
+$ps = Stock::periods(Stock::seriesFor('beef'));
+eq('同一天分成两段', count($ps), 2);
+eq('午市用量 10 − 7 = 3', $ps[0]['used'], 3.0);
+eq('晚市用量 7 + 5 − 4 = 8', $ps[1]['used'], 8.0);
+eq('晚市那段记下了期间存入', $ps[1]['in'], 5.0);
+eq('段带着时点标签', [$ps[0]['from_moment'], $ps[0]['to_moment']], ['arrive', 'lunch_end']);
+
+// ---- 盘出来比账面还多 = 漏记了存入，不能悄悄当 0 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '11:00', 'salmon_skin', 'count', '2', 'arrive');
+$sIn('2026-09-06', '23:30', 'salmon_skin', 'count', '6', 'dinner_end');
+$ps = Stock::periods(Stock::seriesFor('salmon_skin'));
+eq('用量算成负数', $ps[0]['used'], -4.0);
+ok('负数被标出来让人回去补', $ps[0]['negative']);
+
+// ---- 作废的记录不参与结存 ----
+Store::useMemoryForTests();
+$sIn('2026-09-05', '23:30', 'beef', 'count', '10');
+$badIn = $sIn('2026-09-06', '11:00', 'beef', 'in', '99');
+$sIn('2026-09-06', '23:30', 'beef', 'count', '8');
+eq('作废之前：10 + 99 − 8', Stock::periods(Stock::seriesFor('beef'))[0]['used'], 101.0);
+Stock::softDelete($badIn);
+eq('作废之后那笔存入不算了', Stock::periods(Stock::seriesFor('beef'))[0]['used'], 2.0);
+Stock::restore($badIn);
+eq('恢复后又算回来', Stock::periods(Stock::seriesFor('beef'))[0]['used'], 101.0);
+eq('增改删都留了痕', count(Stock::history($badIn)), 3);
+
+// ---- 只存入没盘过：算不出用量，也不能假装知道库存 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '11:00', 'salmon_mince', 'in', '5');
+$cur = Stock::current()['salmon_mince'];
+ok('没盘过就标成没盘过', !$cur['counted']);
+eq('没盘过时算不出账面', $cur['book'], null);
+eq('没盘过时没有分段', count($cur['periods']), 0);
+eq('存入总量还是记着的', $cur['in_total'], 5.0);
+
+// ---- 盘点进度：一条一条录，最容易漏项 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '23:30', 'salmon_fillet', 'count', '5');
+$pg = Stock::countProgress('2026-09-06 23:30');
+eq('这一轮盘了 1 项', count($pg['done']), 1);
+eq('还差的项数 = 清单总数 − 已盘', count($pg['missing']), count(Stock::items()) - 1);
+eq('没有盘点的时刻返回 null', Stock::countProgress('2026-09-06 09:00'), null);
+
+// ---- 品类清单与单位 ----
+ok('品类清单读得到', count(Stock::items()) > 0);
+eq('每个品类各自固定一个单位', Stock::itemUnit('salmon_fillet'), '箱');
+eq('时点有显示名', Stock::momentLabel('lunch_end'), '午市后');
+eq('未知时点不炸', Stock::momentLabel('不存在'), '');
+eq('未知品类退回代码本身', Stock::itemLabel('不存在'), '不存在');
+
+// ---- 页面与铁律 ----
+$stkSrc = (string) file_get_contents(__DIR__ . '/../stock.php');
+$nowSrc = (string) file_get_contents(__DIR__ . '/../stocknow.php');
+ok('库存录入页要求登录', strpos($stkSrc, 'Auth::requireLogin()') !== false);
+ok('写操作走 POST + CSRF', strpos($stkSrc, 'Auth::csrfValid') !== false);
+ok('提交后跳转，避免刷新重复提交', strpos($stkSrc, "header('Location: '") !== false);
+ok('作废前要二次确认', strpos($stkSrc, 'onsubmit="return confirm(') !== false);
+ok('库存页不碰主库', strpos($stkSrc, 'Db::select') === false);
+ok('当前库存页不碰主库', strpos($nowSrc, 'Db::select') === false);
+// 当前库存页是纯展示，一行写操作都不该有
+ok('当前库存页不写任何东西',
+   preg_match('/\b(INSERT|UPDATE|DELETE|CREATE)\b/', $nowSrc) === 0);
+ok('用到 Report 就 require 了 report.php',
+   strpos($stkSrc, 'Report::') === false
+   || strpos($stkSrc, "require_once __DIR__ . '/lib/report.php'") !== false);
+ok('数字列表头带 class="n"',
+   preg_match('/<th>(数量|最近盘点|之后存入|账面上限|上一段用量)/u', $stkSrc . $nowSrc) === 0);
+// 账面 ≠ 实时库存，这句话必须留在页面上，不然一定会被当成现在冰箱里的量
+ok('页面写明账面不是实时库存',
+   strpos($nowSrc, '不等于「现在冰箱里有多少」') !== false);
+// 库存和采购是两本账，程序里不做对应 —— 别让人「顺手」接起来
+ok('库存那侧不引用采购逻辑',
+   strpos($stkSrc, 'Meat::') === false && strpos($nowSrc, 'Meat::') === false);
+ok('库存逻辑层也不引用采购逻辑',
+   strpos((string) file_get_contents(__DIR__ . '/../lib/stock.php'), 'Meat::') === false);
 
 // =====================================================================
 echo "\n【2e2b】期间对比\n";

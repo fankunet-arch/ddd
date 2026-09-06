@@ -51,6 +51,15 @@ code{background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:.88em;
 .tabs a.on{color:#fff;background:#2f3d51;border-bottom-color:var(--accent)}
 .tabs .sm{display:none}
 
+/* 页内子标签（如 肉类采购 → 录入 / 周报表） */
+.subtabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}
+/* 手指点得到：高度不低于 38px（低于这个值在手机上很难点准） */
+.subtabs a{font-size:13px;display:inline-flex;align-items:center;min-height:38px;
+  padding:0 16px;border-radius:999px;
+  border:1px solid var(--line);color:var(--dim);background:var(--panel)}
+.subtabs a:hover{color:var(--text);border-color:#c3ccd8;text-decoration:none}
+.subtabs a.on{color:#fff;background:var(--accent);border-color:var(--accent)}
+
 main{max-width:1240px;margin:22px auto 60px;padding:0 20px}
 h2{font-size:16px;margin:30px 0 12px;display:flex;align-items:center;gap:10px}
 h2::after{content:"";flex:1;height:1px;background:var(--line)}
@@ -62,8 +71,12 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
 .panel .row{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:12px}
 .panel .row:last-child{margin-bottom:0}
 .panel label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--dim)}
+/* label 是竖排的 flex，裸文字和 <span class="req">*</span> 会各占一行 ——
+   于是必填字段的输入框比选填的低一截，整排对不齐。把标题连同星号包成
+   一个 .cap，它们就在同一行里了。 */
+.panel label > .cap{display:block}
 .panel label.grow{flex:1;min-width:260px}
-.panel input[type=date],.panel input[type=text],.panel select{
+.panel input[type=date],.panel input[type=time],.panel input[type=text],.panel select{
   border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;
   /* 16px 以下 iOS 会在聚焦时自动放大页面，所以不要更小 */
   font-size:16px;background:#fff;color:var(--text);min-width:150px;
@@ -84,6 +97,43 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
   min-height:34px;user-select:none}
 .cb input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent);margin:0}
 .hint{font-size:12px;color:var(--dim);margin-left:auto}
+
+/* 录入表单的一排字段。
+   默认的 `flex + min-width:150px` 对查询面板够用（就两三个日期框），
+   但录入表单一排有五六个宽窄悬殊的字段：「数量」只要填个 3，却和
+   「品类」一样占 150px 起步；一旦换行，最后那个字段独占一行、
+   右边留一大片空白，看着就是错位。
+   所以这里按内容给宽度，并让最宽的那个（品类）吃掉剩余空间，
+   各列的左边缘就对齐了。 */
+.panel .row.fields{gap:12px 14px}
+.panel .row.fields input,.panel .row.fields select{min-width:0;width:100%}
+.panel .row.fields > label.w-xs{flex:0 1 118px}   /* 数量 */
+.panel .row.fields > label.w-sm{flex:0 1 138px}   /* 时间、时点 */
+.panel .row.fields > label.w-md{flex:0 1 168px}   /* 日期 */
+.panel .row.fields > label.w-lg{flex:1 1 200px}   /* 品类，吃掉剩余宽度 */
+
+/* 二选一的大按钮（库存的「存入 / 盘点」）。
+   故意做得比下拉框显眼：这两个动作含义相反 —— 一个是往上加、
+   一个是「就是这么多」—— 选反了整段用量会算错方向，值得占这点地方。
+   选中状态不只靠颜色：边框加粗 + 单选圆点本身就是记号。 */
+/* 两张卡等宽，否则「存入」比「盘点」窄一截，看着像没对齐 */
+.pick{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;width:100%}
+.pick .pickopt{flex:1 1 240px;max-width:340px}
+.picklabel{width:100%;font-size:12px;color:var(--dim);margin-bottom:-4px}
+/* 选择器要压过上面的 .panel label（那条把 label 变成竖排了） */
+.panel label.pickopt{display:flex;flex-direction:row;align-items:center;gap:10px;
+  cursor:pointer;border:2px solid var(--line);border-radius:var(--radius-sm);
+  padding:9px 16px;min-height:52px;background:var(--panel);font-size:15px}
+/* 单选钮照常显示 —— 藏起来只用边框表示选中的话，没有 JS 就没有点击反馈 */
+.pickopt input[type=radio]{width:20px;height:20px;accent-color:var(--accent);margin:0;flex:none}
+.pickopt .txt{display:flex;flex-direction:column;gap:2px}
+.pickopt strong{font-size:15px;color:var(--text)}
+.pickopt small{font-size:12px;color:var(--dim)}
+.pickopt:hover{border-color:#c3ccd8}
+/* .on 是服务端渲染的初始态；:has 让点击后立刻有反应，两者都留着 */
+.pickopt.on,.pickopt:has(input:checked){border-color:var(--accent);background:#f3f7ff}
+.pickopt.on strong,.pickopt:has(input:checked) strong{color:var(--accent-d)}
+.pickopt:focus-within{outline:2px solid var(--accent);outline-offset:2px}
 .presets{display:flex;gap:7px;margin-top:12px;flex-wrap:wrap}
 .presets a{font-size:13px;padding:6px 14px;border:1px solid var(--line);
   border-radius:20px;color:var(--dim);background:#fff}
@@ -160,6 +210,14 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
 .cards.cmp .card.t-down{border-top-color:var(--err)}
 .cards.cmp .card.t-up.ru{border-top-color:var(--err)}
 .cards.cmp .card.t-down.ru{border-top-color:var(--ok)}
+
+/* ---------- 录入表单 ---------- */
+.req{color:var(--err);font-weight:700}
+/* 字段级错误：贴在对应输入框下面，比顶部一条笼统的提示好定位 */
+.fe{display:block;color:var(--err);font-size:12px;font-style:normal;margin-top:3px}
+/* 估算值：和实测数长得不一样，一眼能分出来 */
+.est{color:var(--dim);font-style:italic}
+table.grid td .est{border-bottom:1px dotted var(--dim2)}
 
 /* ---------- 表格 ---------- */
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;background:var(--panel);
@@ -317,6 +375,8 @@ tr.acked td .state,tr.acked td .btn-mini{opacity:1}
   border-radius:var(--radius)}
 .empty{color:var(--dim);padding:34px 20px;text-align:center;background:var(--panel);
   border:1px dashed var(--line);border-radius:var(--radius)}
+/* 空状态里那条链接往往是这一页唯一能点的东西，得撑到能点得准 */
+.empty a{display:inline-flex;align-items:center;min-height:38px;padding:0 14px}
 .note{font-size:12.5px;color:var(--dim);margin:10px 0 0;line-height:1.7}
 .meta{font-size:12px;color:var(--dim2);margin:16px 0 0;line-height:1.8}
 .foot{max-width:1240px;margin:0 auto 30px;padding:0 20px;font-size:12px;color:var(--dim2)}
@@ -360,8 +420,12 @@ tr.acked td .state,tr.acked td .btn-mini{opacity:1}
   .panel .row{flex-direction:column;align-items:stretch;gap:12px}
   .panel label{width:100%}
   .panel label.grow{min-width:0}
-  .panel input[type=date],.panel input[type=text],.panel select{
+  .panel input[type=date],.panel input[type=time],.panel input[type=text],.panel select{
     width:100%;min-width:0}
+  /* 手机上一行一个字段，宽度类一律让位 */
+  .panel .row.fields{display:flex}
+  .panel .row.fields > label{flex:1 1 auto!important;width:100%}
+  .panel label.pickopt{width:100%}
   .panel button[type=submit]{width:100%}
   .opts{gap:4px}
   .cb{min-height:40px}

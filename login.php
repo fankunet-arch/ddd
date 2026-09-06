@@ -54,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1e2836">
 <title>登录 · 营业数据查询</title>
-<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="<?= h(asset('assets/app.css')) ?>">
 </head>
 <body class="loginpage">
 <form class="loginbox" method="post" action="login.php">
