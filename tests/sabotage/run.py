@@ -114,6 +114,14 @@ CASES = [
                   'public static function itemLabel(string $code): string\n    {\n        Meat::kinds();', 1))),
     ('当前库存页长出写库语句',
      lambda r: append(r, 'stocknow.php', '\n<?php $sql = "UPDATE stock_move SET qty = 0"; ?>\n')),
+    ('把样式表引用改回写死路径（浏览器会一直用旧缓存）',
+     lambda r: edit(r, 'login.php', lambda s: s.replace(
+         '''<link rel="stylesheet" href="<?= h(asset('assets/app.css')) ?>">''',
+         '<link rel="stylesheet" href="assets/app.css">', 1))),
+    ('asset() 在文件读不到时退回不带版本号的地址',
+     lambda r: edit(r, 'lib/view.php', lambda s: s.replace(
+         "return $cache[$rel] = $rel . '?v=' . rawurlencode($v);",
+         "return $cache[$rel] = $rel;", 1))),
     ('周报表把已作废的采购也算进去',
      lambda r: edit(r, 'lib/meat.php', lambda s: s.replace(
          "if (($r['deleted_at'] ?? null) !== null) {\n                continue;",

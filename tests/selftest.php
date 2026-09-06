@@ -177,6 +177,28 @@ $cssSrc0 = (string) file_get_contents($ROOT . '/assets/app.css');
 ok('输入框字号不低于 16px',
    preg_match('/input\[type=date\][^{]*\{[^}]*font-size:16px/s', $cssSrc0) === 1);
 
+// ---- 静态文件必须带缓存版本号 ----
+// 少了它，用户浏览器会一直用缓存里的旧 app.css：新控件完全没样式，页面看着就是坏的，
+// 而服务器端一点都看不出来。所有引用都得走 asset()，不许直接写死路径。
+foreach ($phpFiles as $f) {
+    $base = basename($f);
+    if (in_array($base, ['selftest.php', 'view.php'], true)) {
+        continue;                       // 自检本身和 asset() 的定义处要写这个字符串
+    }
+    $src = (string) file_get_contents($f);
+    ok("{$base} 的静态文件引用带版本号",
+       preg_match('/(?:href|src)="assets\//', $src) === 0);
+}
+require_once $ROOT . '/lib/view.php';
+foreach (['assets/app.css', 'assets/app.js'] as $a) {
+    ok("asset('{$a}') 带上了 ?v=", strpos(asset($a), $a . '?v=') === 0);
+}
+// 文件读不到时也不能退回「不带版本号」—— 那等于这道防线在最需要的时候失效
+ok('文件不存在时仍然带版本号',
+   strpos(asset('assets/这个文件不存在.css'), '?v=') !== false);
+ok('asset_version 有默认值',
+   array_key_exists('asset_version', (array) require $ROOT . '/lib/settings.php'));
+
 // ---- 铁律八：手机与桌面共用同一个格式化函数 ----
 $openSrc0 = (string) file_get_contents($ROOT . '/open.php');
 ok('开台核对两套视图共用 $fmt',

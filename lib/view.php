@@ -8,6 +8,49 @@ function h($s): string
     return htmlspecialchars((string) $s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
+/**
+ * 静态文件的地址，带上「版本号」防止浏览器拿旧的缓存。
+ *
+ * 这是踩过的坑：只传了 .php 没传 assets/app.css，或者传了但浏览器还用着
+ * 缓存里的旧样式 —— 页面看着就是坏的（新控件完全没样式），
+ * 而这种问题从服务器端一点都看不出来。加了版本号，文件一变地址就变，
+ * 浏览器自然会重新下载，不需要教人按 Ctrl+F5。
+ *
+ * 版本号怎么来，看 config 的 asset_version：
+ *
+ *   'auto'  （默认）文件内容的哈希 —— 改了就立刻更新，没改就一直用缓存。
+ *                   最准，也不会白白重下。
+ *   'date'          今天的日期 —— 每天最多用一天的旧文件，第二天必定更新。
+ *                   FTP 上传会保留原文件时间戳的话，这个最稳妥。
+ *   'mtime'         文件的修改时间。
+ *   其它字符串       直接当版本号用（比如自己填个 '2026-09-06a'）。
+ *
+ * 读不到文件时一律退回日期，绝不返回不带版本号的地址。
+ */
+function asset(string $rel): string
+{
+    static $cache = [];
+    if (isset($cache[$rel])) {
+        return $cache[$rel];
+    }
+    require_once __DIR__ . '/db.php';
+    $mode = trim((string) (Db::config()['asset_version'] ?? 'auto'));
+    $file = dirname(__DIR__) . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $rel);
+
+    if ($mode === 'auto') {
+        $h = is_file($file) ? md5_file($file) : false;
+        $v = $h === false ? date('Ymd') : substr($h, 0, 8);
+    } elseif ($mode === 'mtime') {
+        $t = is_file($file) ? filemtime($file) : false;
+        $v = $t === false ? date('Ymd') : (string) $t;
+    } elseif ($mode === 'date' || $mode === '') {
+        $v = date('Ymd');
+    } else {
+        $v = $mode;                       // 自己填的固定版本号
+    }
+    return $cache[$rel] = $rel . '?v=' . rawurlencode($v);
+}
+
 /** 金额格式化 */
 function money($v): string
 {
@@ -63,7 +106,7 @@ function pageHeader(string $title, string $active): void
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1e2836">
 <title><?= h($title) ?></title>
-<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="<?= h(asset('assets/app.css')) ?>">
 </head>
 <body>
 <header class="topbar">
