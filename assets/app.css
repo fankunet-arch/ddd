@@ -161,6 +161,14 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
 .cards.cmp .card.t-up.ru{border-top-color:var(--err)}
 .cards.cmp .card.t-down.ru{border-top-color:var(--ok)}
 
+/* ---------- 录入表单 ---------- */
+.req{color:var(--err);font-weight:700}
+/* 字段级错误：贴在对应输入框下面，比顶部一条笼统的提示好定位 */
+.fe{display:block;color:var(--err);font-size:12px;font-style:normal;margin-top:3px}
+/* 估算值：和实测数长得不一样，一眼能分出来 */
+.est{color:var(--dim);font-style:italic}
+table.grid td .est{border-bottom:1px dotted var(--dim2)}
+
 /* ---------- 表格 ---------- */
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;background:var(--panel);
   border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
