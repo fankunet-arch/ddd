@@ -166,6 +166,8 @@ pageHeader('肉类采购', 'meat');
   <a href="meatweek.php">周报表</a>
 </nav>
 
+<?php storeBanner(); ?>
+
 <?php if ($storeErr): ?>
   <p class="err"><strong>数据文件不可用：</strong><?= h($storeErr) ?><br>
     数据文件路径：<code><?= h(Store::path()) ?></code><br>

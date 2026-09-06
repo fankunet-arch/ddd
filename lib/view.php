@@ -51,6 +51,38 @@ function asset(string $rel): string
     return $cache[$rel] = $rel . '?v=' . rawurlencode($v);
 }
 
+/**
+ * 数据文件放错地方时的红字警告。
+ *
+ * 用到自有存储的页面（采购、库存）都要调一次。放在这里而不是各页各写一份，
+ * 是因为这条提醒漏掉一页就等于没有 —— 只要有一个页面不报警，
+ * 部署的人就可能一直以为没事。
+ */
+function storeBanner(): void
+{
+    if (!class_exists('Store')) {
+        return;                       // 不用自有存储的页面，什么都不做
+    }
+    $doc = Store::exposedUnder();
+    if ($doc === null) {
+        return;
+    }
+    $path = Store::path();
+    ?>
+  <p class="err"><strong>⚠️ 数据文件放在了网站可访问的目录里，请尽快挪走。</strong><br>
+    当前位置：<code><?= h($path) ?></code><br>
+    网站根目录：<code><?= h($doc) ?></code><br>
+    <code>.db</code> 就是个普通文件 —— 放在网站目录下，
+    <strong>谁把网址猜对了就能把整个数据库下载走</strong>，不需要登录，
+    日志里也只是一次普通的静态文件请求，你不会发现。
+    <br>
+    改法：在 <code>config.php</code> 里把 <code>store_path</code> 指到
+    <strong>网站根目录之外</strong>的路径，然后把已有的
+    <code>app.db</code>（连同 <code>app.db-wal</code>、<code>app.db-shm</code>，有就一起）
+    移过去，最后删掉旧目录。详见 README「七之三 · 数据存哪」。</p>
+    <?php
+}
+
 /** 金额格式化 */
 function money($v): string
 {

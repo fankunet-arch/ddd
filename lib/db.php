@@ -78,6 +78,26 @@ final class Db
     }
 
     /**
+     * 仅供自检脚本：临时把几个配置项换掉，传 null 恢复原样。
+     *
+     * 只覆盖传进来的键，其余仍走正常的两层合并 —— 这样测试里改一个
+     * store_path，不会连带把时区、营业时段之类也变成默认值。
+     */
+    public static function forTests(?array $over): void
+    {
+        static $saved = null;
+        if ($over === null) {
+            self::$cfg = $saved ?? [];
+            $saved = null;
+            return;
+        }
+        if ($saved === null) {
+            $saved = self::config();
+        }
+        self::$cfg = $over + ($saved ?: []);
+    }
+
+    /**
      * 把 PHP 的时区对齐到 POS 所在时区。
      *
      * PHP 用自己的时钟算「今天是哪个营业日」和「这张台开了多久」，而时间数据是

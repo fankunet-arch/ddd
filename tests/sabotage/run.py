@@ -114,6 +114,17 @@ CASES = [
                   'public static function itemLabel(string $code): string\n    {\n        Meat::kinds();', 1))),
     ('当前库存页长出写库语句',
      lambda r: append(r, 'stocknow.php', '\n<?php $sql = "UPDATE stock_move SET qty = 0"; ?>\n')),
+    ('数据文件落在网站目录里也不报警',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         "return ($d === $r || strncmp($d, $r . '/', strlen($r) + 1) === 0) ? $doc : null;",
+         'return null;', 1))),
+    ('前缀相同就误判成「在网站目录里」（/var/www 与 /var/wwwdata）',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         "strncmp($d, $r . '/', strlen($r) + 1) === 0",
+         'strncmp($d, $r, strlen($r)) === 0', 1))),
+    ('库存页不再提示数据文件放错位置',
+     lambda r: edit(r, 'stock.php', lambda s: s.replace(
+         '<?php storeBanner(); ?>', '', 1))),
     ('把样式表引用改回写死路径（浏览器会一直用旧缓存）',
      lambda r: edit(r, 'login.php', lambda s: s.replace(
          '''<link rel="stylesheet" href="<?= h(asset('assets/app.css')) ?>">''',

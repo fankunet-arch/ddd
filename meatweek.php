@@ -168,6 +168,8 @@ pageHeader('肉类采购', 'meat');
   <a href="meatweek.php" class="on">周报表</a>
 </nav>
 
+<?php storeBanner(); ?>
+
 <?php if ($storeErr): ?>
   <p class="err"><strong>采购数据不可用：</strong><?= h($storeErr) ?></p>
 <?php endif; ?>

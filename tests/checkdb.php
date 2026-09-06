@@ -109,6 +109,41 @@ if (!Auth::isConfigured()) {
     warnmsg('登录密码: 已设置（明文）—— 建议改用哈希，见 README「登录」一节');
 }
 
+// =====================================================================
+echo "\n===== 2b. 自有数据文件（采购 / 库存）=====\n";
+// =====================================================================
+require_once __DIR__ . '/../lib/store.php';
+$sp  = Store::path();
+$sd  = dirname($sp);
+line('[路径]', $sp);
+
+// 从命令行跑时拿不到网站根目录 —— 这时按「程序目录」推一把，宁可多问一句
+$docRoot = (string) ($_SERVER['DOCUMENT_ROOT'] ?? '');
+$exposed = Store::exposedUnder();
+if ($exposed !== null) {
+    errmsg("数据文件在网站可访问目录里（网站根：{$exposed}）—— "
+         . '别人猜对网址就能把整个数据库下载走。'
+         . '请在 config.php 里把 store_path 指到网站根目录【外面】，'
+         . '再把 app.db（连同 app.db-wal / app.db-shm）移过去');
+} elseif ($docRoot === '') {
+    warnmsg('命令行下取不到网站根目录，没法判断数据文件是不是在网站目录里。'
+          . '请在浏览器里打开采购页或库存页看一眼 —— 放错了页面顶部会有红字警告');
+} else {
+    okmsg("数据文件在网站根目录之外（网站根：{$docRoot}）");
+}
+
+if (!is_dir($sd)) {
+    warnmsg("数据目录还不存在：{$sd}（第一次保存记录时会自动建）");
+} elseif (!is_writable($sd)) {
+    errmsg("数据目录不可写：{$sd} —— 采购和库存都会存不进去，请给 Web 服务器账号加写权限");
+} else {
+    okmsg("数据目录可写：{$sd}");
+}
+if (is_file($sp)) {
+    okmsg('数据文件已存在，' . number_format(filesize($sp) / 1024, 1) . ' KB'
+        . '（备份就是复制这一个文件；WAL 模式下同目录还会有 -wal / -shm）');
+}
+
 if ($err > 0) {
     echo "\n环境有问题，先解决上面的错误再继续。\n";
     if (!$cli) echo '</pre>';

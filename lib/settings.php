@@ -167,6 +167,7 @@ return [
         'salmon_fillet' => ['name' => '三文鱼条', 'unit' => '箱'],
         'salmon_skin'   => ['name' => '黑皮',     'unit' => '盒'],
         'salmon_mince'  => ['name' => '鱼沫',     'unit' => '盒'],
+        'lubina_fillet' => ['name' => 'lubina',   'unit' => '条'],
         'beef'          => ['name' => '牛肉',     'unit' => '包'],
     ],
 

@@ -71,6 +71,8 @@ pageHeader('库存', 'stock');
   <a href="stocknow.php" class="on">当前库存</a>
 </nav>
 
+<?php storeBanner(); ?>
+
 <?php if ($storeErr): ?>
   <p class="err"><strong>数据文件不可用：</strong><?= h($storeErr) ?></p>
 <?php endif; ?>

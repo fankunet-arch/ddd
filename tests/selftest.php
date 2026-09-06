@@ -177,6 +177,54 @@ $cssSrc0 = (string) file_get_contents($ROOT . '/assets/app.css');
 ok('输入框字号不低于 16px',
    preg_match('/input\[type=date\][^{]*\{[^}]*font-size:16px/s', $cssSrc0) === 1);
 
+// ---- 数据文件落在网站可访问目录时必须报警 ----
+// 铁律二第 4 条以前只写在文档里，实际部署踩过：宝塔那类面板的目录是
+//   /www/wwwroot/站点/www/wwwroot/   ← 网站根
+//   /www/wwwroot/站点/www/           ← 这层才在外面
+// 程序放进网站根下面一层时，默认的「程序目录上一级」正好还在网站根里。
+// 文档拦不住这种事，得让程序自己在页面上喊出来。
+require_once $ROOT . '/lib/store.php';
+$docSaved = $_SERVER['DOCUMENT_ROOT'] ?? null;
+$tmpRoot  = sys_get_temp_dir() . '/selftest_doc_' . getmypid();
+@mkdir($tmpRoot . '/sub/data', 0777, true);
+@mkdir(dirname($tmpRoot) . '/outside_' . getmypid(), 0777, true);
+
+$_SERVER['DOCUMENT_ROOT'] = $tmpRoot;
+Db::forTests(['store_path' => $tmpRoot . '/sub/data/app.db']);
+eq('数据文件在网站根里面 → 报警', Store::exposedUnder(), realpath($tmpRoot));
+Db::forTests(['store_path' => $tmpRoot . '/data/app.db']);
+@mkdir($tmpRoot . '/data', 0777, true);
+eq('就在网站根那一层 → 也报警', Store::exposedUnder(), realpath($tmpRoot));
+Db::forTests(['store_path' => dirname($tmpRoot) . '/outside_' . getmypid() . '/app.db']);
+eq('放在网站根外面 → 不报警', Store::exposedUnder(), null);
+// 名字前缀相同但不是子目录，不能误判（/var/www 与 /var/wwwdata）
+@mkdir($tmpRoot . 'x/data', 0777, true);
+Db::forTests(['store_path' => $tmpRoot . 'x/data/app.db']);
+eq('只是名字前缀像，不算在里面', Store::exposedUnder(), null);
+// 命令行等场景取不到网站根目录时不许误报
+unset($_SERVER['DOCUMENT_ROOT']);
+Db::forTests(['store_path' => $tmpRoot . '/sub/data/app.db']);
+eq('取不到网站根目录时不误报', Store::exposedUnder(), null);
+
+if ($docSaved !== null) { $_SERVER['DOCUMENT_ROOT'] = $docSaved; }
+Db::forTests(null);
+foreach ([$tmpRoot . '/sub/data', $tmpRoot . '/sub', $tmpRoot . '/data', $tmpRoot,
+          $tmpRoot . 'x/data', $tmpRoot . 'x',
+          dirname($tmpRoot) . '/outside_' . getmypid()] as $d) {
+    @rmdir($d);
+}
+
+// 四个用到自有存储的页面都要报警 —— 漏掉一页，部署的人就可能一直以为没事
+foreach (['meat.php', 'meatweek.php', 'stock.php', 'stocknow.php'] as $pg) {
+    ok("{$pg} 会提示数据文件放错位置",
+       strpos((string) file_get_contents($ROOT . '/' . $pg), 'storeBanner()') !== false);
+}
+ok('警告里写清了怎么改',
+   strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'store_path') !== false);
+// WAL 模式下还有两个附属文件，只搬走主文件会丢最近的写入
+ok('警告里提醒了 -wal / -shm 也要一起搬',
+   strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'app.db-wal') !== false);
+
 // ---- 静态文件必须带缓存版本号 ----
 // 少了它，用户浏览器会一直用缓存里的旧 app.css：新控件完全没样式，页面看着就是坏的，
 // 而服务器端一点都看不出来。所有引用都得走 asset()，不许直接写死路径。

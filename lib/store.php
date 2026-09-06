@@ -51,6 +51,47 @@ final class Store
         return $p;
     }
 
+    /**
+     * 数据文件是不是落在【网站可访问目录】里了？是的话返回网站根目录，否则返回 null。
+     *
+     * 这不是理论风险：`.db` 就是个普通文件，放在 web 目录下，
+     * 谁把 URL 猜对了就能把整个数据库下载走 —— 不需要登录、日志里也只是一次
+     * 普通的静态文件请求，你根本不会发现。
+     *
+     * 默认路径是「程序目录的上一级」，这在多数虚机上就在网站目录外面；
+     * 但宝塔/aaPanel 那类面板常见的目录是
+     *
+     *     /www/wwwroot/站点/www/wwwroot/     ← 网站根（可访问）
+     *     /www/wwwroot/站点/www/             ← 这层才在外面
+     *
+     * 程序放进网站根下面一层时，「上一级」正好还在网站根里 —— 默认值就踩空了。
+     * 所以这里在运行时实测一次，踩空了页面上直接红字报警，
+     * 而不是指望部署的人记得看文档。
+     */
+    public static function exposedUnder(): ?string
+    {
+        $doc = (string) ($_SERVER['DOCUMENT_ROOT'] ?? '');
+        if ($doc === '') {
+            return null;                       // 命令行等场景判断不了，不误报
+        }
+        $doc = realpath($doc);
+        if ($doc === false) {
+            return null;
+        }
+        $dir = realpath(dirname(self::path()));
+        if ($dir === false) {
+            $dir = dirname(self::path());      // 目录还没建出来时按字面比
+        }
+        $norm = static function (string $p): string {
+            $p = rtrim(str_replace('\\', '/', $p), '/');
+            // Windows 路径大小写不敏感，别因为大小写不同就判成「安全」
+            return DIRECTORY_SEPARATOR === '\\' ? strtolower($p) : $p;
+        };
+        $d = $norm($dir);
+        $r = $norm($doc);
+        return ($d === $r || strncmp($d, $r . '/', strlen($r) + 1) === 0) ? $doc : null;
+    }
+
     /** 数据文件是否已经能用（不能用时用 lastError() 取原因） */
     public static function isReady(): bool
     {
