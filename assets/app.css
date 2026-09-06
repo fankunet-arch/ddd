@@ -98,11 +98,27 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
 .cb input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent);margin:0}
 .hint{font-size:12px;color:var(--dim);margin-left:auto}
 
+/* 录入表单的一排字段。
+   默认的 `flex + min-width:150px` 对查询面板够用（就两三个日期框），
+   但录入表单一排有五六个宽窄悬殊的字段：「数量」只要填个 3，却和
+   「品类」一样占 150px 起步；一旦换行，最后那个字段独占一行、
+   右边留一大片空白，看着就是错位。
+   所以这里按内容给宽度，并让最宽的那个（品类）吃掉剩余空间，
+   各列的左边缘就对齐了。 */
+.panel .row.fields{gap:12px 14px}
+.panel .row.fields input,.panel .row.fields select{min-width:0;width:100%}
+.panel .row.fields > label.w-xs{flex:0 1 118px}   /* 数量 */
+.panel .row.fields > label.w-sm{flex:0 1 138px}   /* 时间、时点 */
+.panel .row.fields > label.w-md{flex:0 1 168px}   /* 日期 */
+.panel .row.fields > label.w-lg{flex:1 1 200px}   /* 品类，吃掉剩余宽度 */
+
 /* 二选一的大按钮（库存的「存入 / 盘点」）。
    故意做得比下拉框显眼：这两个动作含义相反 —— 一个是往上加、
    一个是「就是这么多」—— 选反了整段用量会算错方向，值得占这点地方。
    选中状态不只靠颜色：边框加粗 + 单选圆点本身就是记号。 */
+/* 两张卡等宽，否则「存入」比「盘点」窄一截，看着像没对齐 */
 .pick{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;width:100%}
+.pick .pickopt{flex:1 1 240px;max-width:340px}
 .picklabel{width:100%;font-size:12px;color:var(--dim);margin-bottom:-4px}
 /* 选择器要压过上面的 .panel label（那条把 label 变成竖排了） */
 .panel label.pickopt{display:flex;flex-direction:row;align-items:center;gap:10px;
@@ -404,8 +420,12 @@ tr.acked td .state,tr.acked td .btn-mini{opacity:1}
   .panel .row{flex-direction:column;align-items:stretch;gap:12px}
   .panel label{width:100%}
   .panel label.grow{min-width:0}
-  .panel input[type=date],.panel input[type=text],.panel select{
+  .panel input[type=date],.panel input[type=time],.panel input[type=text],.panel select{
     width:100%;min-width:0}
+  /* 手机上一行一个字段，宽度类一律让位 */
+  .panel .row.fields{display:flex}
+  .panel .row.fields > label{flex:1 1 auto!important;width:100%}
+  .panel label.pickopt{width:100%}
   .panel button[type=submit]{width:100%}
   .opts{gap:4px}
   .cb{min-height:40px}

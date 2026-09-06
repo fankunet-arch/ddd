@@ -227,17 +227,17 @@ pageHeader('库存', 'stock');
     <?php if (isset($errors['move_kind'])): ?><em class="fe"><?= h($errors['move_kind']) ?></em><?php endif; ?>
   </div>
 
-  <div class="row">
-    <label><span class="cap">日期 <span class="req">*</span></span>
+  <div class="row fields">
+    <label class="w-md"><span class="cap">日期 <span class="req">*</span></span>
       <input type="date" name="happened_date" required
              value="<?= $fv('happened_date', q('d', $today)) ?>">
       <?php if (isset($errors['happened_date'])): ?><em class="fe"><?= h($errors['happened_date']) ?></em><?php endif; ?>
     </label>
-    <label>时点
+    <label class="w-sm">时点
       <select name="moment"
               onchange="var o=this.options[this.selectedIndex],t=o.getAttribute('data-time');
                         if(t){this.form.happened_time.value=t;}">
-        <option value="">—</option>
+        <option value="">不指定</option>
         <?php foreach ($moments as $code => $m): ?>
           <option value="<?= h($code) ?>" data-time="<?= h($m['time']) ?>"
             <?= (string) ($form['moment'] ?? q('m', '')) === $code ? 'selected' : '' ?>><?= h($m['name']) ?></option>
@@ -245,12 +245,12 @@ pageHeader('库存', 'stock');
       </select>
       <?php if (isset($errors['moment'])): ?><em class="fe"><?= h($errors['moment']) ?></em><?php endif; ?>
     </label>
-    <label><span class="cap">时间 <span class="req">*</span></span>
+    <label class="w-sm"><span class="cap">时间 <span class="req">*</span></span>
       <input type="time" name="happened_time" required
              value="<?= $fv('happened_time', q('t', date('H:i'))) ?>">
       <?php if (isset($errors['happened_time'])): ?><em class="fe"><?= h($errors['happened_time']) ?></em><?php endif; ?>
     </label>
-    <label><span class="cap">品类 <span class="req">*</span></span>
+    <label class="w-lg"><span class="cap">品类 <span class="req">*</span></span>
       <select name="item" required>
         <option value="">请选择…</option>
         <?php foreach ($items as $code => $m): ?>
@@ -260,7 +260,7 @@ pageHeader('库存', 'stock');
       </select>
       <?php if (isset($errors['item'])): ?><em class="fe"><?= h($errors['item']) ?></em><?php endif; ?>
     </label>
-    <label><span class="cap">数量 <span class="req">*</span></span>
+    <label class="w-xs"><span class="cap">数量 <span class="req">*</span></span>
       <input type="text" inputmode="decimal" name="qty" placeholder="例 3"
              value="<?= $fv('qty') ?>">
       <?php if (isset($errors['qty'])): ?><em class="fe"><?= h($errors['qty']) ?></em><?php endif; ?>
