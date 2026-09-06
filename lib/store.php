@@ -162,6 +162,45 @@ final class Store
             )
             SQL);
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_mpl_row ON meat_purchase_log(row_id, id)');
+
+        // ---- 库存流水：只记【存入】和【盘点】两种动作 ----
+        // 不记取出 —— 取出量是两次盘点之间算出来的：
+        //   取出 = 上次盘点结存 + 期间存入 − 本次盘点结存
+        // happened_at 精确到分钟：一天可能盘好几次（到店 / 午市后 / 晚市前 /
+        // 晚市后），只记日期的话同一天的几次就排不出先后，用量也就分不到餐期上。
+        $pdo->exec(<<<'SQL'
+            CREATE TABLE IF NOT EXISTS stock_move (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at TEXT    NOT NULL,   -- 'YYYY-MM-DD HH:MM'
+                item        TEXT    NOT NULL,   -- 库存品类代码（stock_items）
+                move_kind   TEXT    NOT NULL,   -- 'in' 存入 | 'count' 盘点
+                qty         REAL    NOT NULL,   -- 存入量 / 盘点结存量
+                moment      TEXT,               -- 时点标签（到店/午市后…），可空
+                note        TEXT,
+                created_at  TEXT    NOT NULL,
+                updated_at  TEXT    NOT NULL,
+                deleted_at  TEXT,
+                CHECK (move_kind IN ('in', 'count')),
+                -- 盘点可以是 0（数完发现空了），存入不行（存 0 等于什么都没做）
+                CHECK (qty >= 0),
+                CHECK (move_kind = 'count' OR qty > 0)
+            )
+            SQL);
+        // 结存和用量都是「按品类、按时间顺序往下推」，所以索引就按这两列
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sm_item ON stock_move(item, happened_at, id)');
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sm_at   ON stock_move(happened_at, id)');
+
+        $pdo->exec(<<<'SQL'
+            CREATE TABLE IF NOT EXISTS stock_move_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                row_id      INTEGER NOT NULL,
+                action      TEXT    NOT NULL,
+                before_json TEXT,
+                after_json  TEXT,
+                at          TEXT    NOT NULL
+            )
+            SQL);
+        $pdo->exec('CREATE INDEX IF NOT EXISTS idx_sml_row ON stock_move_log(row_id, id)');
     }
 
     // ------------------------------------------------------------------
@@ -195,12 +234,19 @@ final class Store
         return (int) self::pdo()->lastInsertId();
     }
 
+    /** 留痕表白名单。表名要拼进 SQL，只能从这里取，不接受外面传进来的字符串。 */
+    private const LOG_TABLES = ['meat_purchase_log', 'stock_move_log'];
+
     /** 记一条改动日志 */
-    public static function log(int $rowId, string $action, ?array $before, ?array $after): void
+    public static function log(int $rowId, string $action, ?array $before, ?array $after,
+                              string $table = 'meat_purchase_log'): void
     {
+        if (!in_array($table, self::LOG_TABLES, true)) {
+            throw new InvalidArgumentException("未知的留痕表：{$table}");
+        }
         self::run(
-            'INSERT INTO meat_purchase_log (row_id, action, before_json, after_json, at)
-             VALUES (:r, :a, :b, :f, :t)',
+            "INSERT INTO {$table} (row_id, action, before_json, after_json, at)
+             VALUES (:r, :a, :b, :f, :t)",
             [':r' => $rowId, ':a' => $action,
              ':b' => $before === null ? null : json_encode($before, JSON_UNESCAPED_UNICODE),
              ':f' => $after  === null ? null : json_encode($after,  JSON_UNESCAPED_UNICODE),

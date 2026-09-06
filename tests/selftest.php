@@ -105,7 +105,7 @@ ok('每条 SQL 都要过只读检查', substr_count($dbSrc, 'assertReadOnly') >=
 // 规矩不是「全程序不许有写语句」（自有数据当然要写），而是写语句只能待在
 // 这两个文件里。别的地方一旦冒出 INSERT/UPDATE/CREATE TABLE，就说明有人
 // 把写操作接到了主库那条线上。
-$WRITE_OK = ['store.php', 'meat.php'];
+$WRITE_OK = ['store.php', 'meat.php', 'stock.php'];
 foreach ($phpFiles as $f) {
     $base = basename($f);
     if (in_array($base, ['selftest.php', 'db.php'], true)) {
@@ -937,6 +937,179 @@ ok('数字列表头带 class="n"', preg_match('/<th>(合计 kg|采购额|人均 
 // 采购 ≠ 消耗：这句必须留在页面上，不然看的人会把进货节奏当成浪费
 ok('页面写明统计的是采购量不是消耗量',
    strpos($mwSrc, '不是「实际消耗量」') !== false);
+
+// =====================================================================
+echo "\n【2e2c】库存（存入 / 盘点 / 用量推算）\n";
+// =====================================================================
+
+require_once __DIR__ . '/../lib/stock.php';
+Store::useMemoryForTests();
+
+$sIn = static function (string $d, string $t, string $item, string $kind, string $q,
+                        ?string $moment = null) {
+    [$c, $e] = Stock::validate(['happened_date' => $d, 'happened_time' => $t, 'item' => $item,
+                                'move_kind' => $kind, 'qty' => $q, 'moment' => $moment]);
+    if ($e) {
+        throw new RuntimeException('测试数据自己就没过校验：' . json_encode($e, JSON_UNESCAPED_UNICODE));
+    }
+    return Stock::create($c);
+};
+
+// ---- 校验 ----
+$base = ['happened_date' => $dAgo(1), 'happened_time' => '23:30',
+         'item' => 'salmon_fillet', 'move_kind' => 'count', 'qty' => '4'];
+[$c, $e] = Stock::validate($base);
+eq('完整的一条能过', $e, []);
+eq('日期和时间合成时刻', $c['happened_at'], $dAgo(1) . ' 23:30');
+
+// 动作故意不给默认值：存入是「加上去」，盘点是「就是这么多」，选反了用量算错方向
+[, $e] = Stock::validate(array_merge($base, ['move_kind' => '']));
+ok('不选动作被拒', isset($e['move_kind']));
+// 传空串和【压根没传】是两回事：给个默认值的话，表单少了这个字段就会
+// 悄悄按默认动作存下去，用量整段算反还没人知道
+$noKind = $base;
+unset($noKind['move_kind']);
+[, $e] = Stock::validate($noKind);
+ok('压根没传动作也被拒（不许有默认动作）', isset($e['move_kind']));
+[, $e] = Stock::validate(array_merge($base, ['move_kind' => 'out']));
+ok('乱造的动作被拒', isset($e['move_kind']));
+
+[, $e] = Stock::validate(array_merge($base, ['happened_time' => '']));
+ok('不填时间被拒（一天可能盘好几次）', isset($e['happened_time']));
+[, $e] = Stock::validate(array_merge($base, ['happened_time' => '25:00']));
+ok('小时超范围被拒', isset($e['happened_time']));
+[, $e] = Stock::validate(array_merge($base, ['happened_time' => '12:70']));
+ok('分钟超范围被拒', isset($e['happened_time']));
+[$c, ] = Stock::validate(array_merge($base, ['happened_time' => '9:05']));
+eq('个位小时补零', $c['happened_at'], $dAgo(1) . ' 09:05');
+
+[, $e] = Stock::validate(array_merge($base,
+    ['happened_date' => date('Y-m-d', strtotime('+30 day'))]));
+ok('未来日期被拒', isset($e['happened_date']));
+[, $e] = Stock::validate(array_merge($base, ['item' => '不存在']));
+ok('品类不在清单里被拒', isset($e['item']));
+[, $e] = Stock::validate(array_merge($base, ['qty' => '']));
+ok('不填数量被拒', isset($e['qty']));
+[, $e] = Stock::validate(array_merge($base, ['qty' => '-1']));
+ok('负数量被拒', isset($e['qty']));
+// 盘点 0 是有意义的（数完发现空了），存入 0 等于什么都没做
+[, $e] = Stock::validate(array_merge($base, ['qty' => '0']));
+eq('盘点 0 可以', $e, []);
+[, $e] = Stock::validate(array_merge($base, ['move_kind' => 'in', 'qty' => '0']));
+ok('存入 0 被拒', isset($e['qty']));
+[$c, ] = Stock::validate(array_merge($base, ['qty' => '2,5']));
+eq('西语逗号小数被识别', $c['qty'], 2.5);
+[, $e] = Stock::validate(array_merge($base, ['moment' => '不存在的时点']));
+ok('时点不在清单里被拒', isset($e['moment']));
+
+// ---- 用户给的那个例子：4 箱 → 存入 3 → 盘点 5 → 用掉 2 ----
+Store::useMemoryForTests();
+$sIn('2026-09-05', '23:30', 'salmon_fillet', 'count', '4', 'dinner_end');
+$sIn('2026-09-06', '11:00', 'salmon_fillet', 'in',    '3');
+$sIn('2026-09-06', '23:30', 'salmon_fillet', 'count', '5', 'dinner_end');
+$ps = Stock::periods(Stock::seriesFor('salmon_fillet'));
+eq('两次盘点之间算一段', count($ps), 1);
+eq('取出 = 上次盘点 + 期间存入 − 本次盘点', $ps[0]['used'], 2.0);
+eq('段的起点是上次盘点', $ps[0]['from'], '2026-09-05 23:30');
+eq('段的终点是本次盘点', $ps[0]['to'], '2026-09-06 23:30');
+eq('段长 24 小时', round($ps[0]['hours']), 24);
+ok('用量为正，不算漏记', !$ps[0]['negative']);
+
+$cur = Stock::current()['salmon_fillet'];
+eq('最近盘点数', $cur['last_qty'], 5.0);
+eq('盘点后没再存入', $cur['since_in'], 0.0);
+eq('账面 = 最近盘点 + 之后存入', $cur['book'], 5.0);
+eq('单位跟着品类走', $cur['unit'], '箱');
+
+// 盘点之后又存入，账面要跟着涨（但那只是上限，之后用掉的没人记）
+$sIn('2026-09-07', '11:00', 'salmon_fillet', 'in', '2');
+$cur = Stock::current()['salmon_fillet'];
+eq('盘点后的存入计入账面', $cur['since_in'], 2.0);
+eq('账面上限 = 5 + 2', $cur['book'], 7.0);
+eq('还是只算了一段（没有新盘点）', count($cur['periods']), 1);
+
+// ---- 一天盘好几次 → 能算出餐期用量 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '11:00', 'beef', 'count', '10', 'arrive');
+$sIn('2026-09-06', '16:30', 'beef', 'count', '7',  'lunch_end');
+$sIn('2026-09-06', '19:30', 'beef', 'in',    '5');
+$sIn('2026-09-06', '23:30', 'beef', 'count', '4',  'dinner_end');
+$ps = Stock::periods(Stock::seriesFor('beef'));
+eq('同一天分成两段', count($ps), 2);
+eq('午市用量 10 − 7 = 3', $ps[0]['used'], 3.0);
+eq('晚市用量 7 + 5 − 4 = 8', $ps[1]['used'], 8.0);
+eq('晚市那段记下了期间存入', $ps[1]['in'], 5.0);
+eq('段带着时点标签', [$ps[0]['from_moment'], $ps[0]['to_moment']], ['arrive', 'lunch_end']);
+
+// ---- 盘出来比账面还多 = 漏记了存入，不能悄悄当 0 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '11:00', 'salmon_skin', 'count', '2', 'arrive');
+$sIn('2026-09-06', '23:30', 'salmon_skin', 'count', '6', 'dinner_end');
+$ps = Stock::periods(Stock::seriesFor('salmon_skin'));
+eq('用量算成负数', $ps[0]['used'], -4.0);
+ok('负数被标出来让人回去补', $ps[0]['negative']);
+
+// ---- 作废的记录不参与结存 ----
+Store::useMemoryForTests();
+$sIn('2026-09-05', '23:30', 'beef', 'count', '10');
+$badIn = $sIn('2026-09-06', '11:00', 'beef', 'in', '99');
+$sIn('2026-09-06', '23:30', 'beef', 'count', '8');
+eq('作废之前：10 + 99 − 8', Stock::periods(Stock::seriesFor('beef'))[0]['used'], 101.0);
+Stock::softDelete($badIn);
+eq('作废之后那笔存入不算了', Stock::periods(Stock::seriesFor('beef'))[0]['used'], 2.0);
+Stock::restore($badIn);
+eq('恢复后又算回来', Stock::periods(Stock::seriesFor('beef'))[0]['used'], 101.0);
+eq('增改删都留了痕', count(Stock::history($badIn)), 3);
+
+// ---- 只存入没盘过：算不出用量，也不能假装知道库存 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '11:00', 'salmon_mince', 'in', '5');
+$cur = Stock::current()['salmon_mince'];
+ok('没盘过就标成没盘过', !$cur['counted']);
+eq('没盘过时算不出账面', $cur['book'], null);
+eq('没盘过时没有分段', count($cur['periods']), 0);
+eq('存入总量还是记着的', $cur['in_total'], 5.0);
+
+// ---- 盘点进度：一条一条录，最容易漏项 ----
+Store::useMemoryForTests();
+$sIn('2026-09-06', '23:30', 'salmon_fillet', 'count', '5');
+$pg = Stock::countProgress('2026-09-06 23:30');
+eq('这一轮盘了 1 项', count($pg['done']), 1);
+eq('还差的项数 = 清单总数 − 已盘', count($pg['missing']), count(Stock::items()) - 1);
+eq('没有盘点的时刻返回 null', Stock::countProgress('2026-09-06 09:00'), null);
+
+// ---- 品类清单与单位 ----
+ok('品类清单读得到', count(Stock::items()) > 0);
+eq('每个品类各自固定一个单位', Stock::itemUnit('salmon_fillet'), '箱');
+eq('时点有显示名', Stock::momentLabel('lunch_end'), '午市后');
+eq('未知时点不炸', Stock::momentLabel('不存在'), '');
+eq('未知品类退回代码本身', Stock::itemLabel('不存在'), '不存在');
+
+// ---- 页面与铁律 ----
+$stkSrc = (string) file_get_contents(__DIR__ . '/../stock.php');
+$nowSrc = (string) file_get_contents(__DIR__ . '/../stocknow.php');
+ok('库存录入页要求登录', strpos($stkSrc, 'Auth::requireLogin()') !== false);
+ok('写操作走 POST + CSRF', strpos($stkSrc, 'Auth::csrfValid') !== false);
+ok('提交后跳转，避免刷新重复提交', strpos($stkSrc, "header('Location: '") !== false);
+ok('作废前要二次确认', strpos($stkSrc, 'onsubmit="return confirm(') !== false);
+ok('库存页不碰主库', strpos($stkSrc, 'Db::select') === false);
+ok('当前库存页不碰主库', strpos($nowSrc, 'Db::select') === false);
+// 当前库存页是纯展示，一行写操作都不该有
+ok('当前库存页不写任何东西',
+   preg_match('/\b(INSERT|UPDATE|DELETE|CREATE)\b/', $nowSrc) === 0);
+ok('用到 Report 就 require 了 report.php',
+   strpos($stkSrc, 'Report::') === false
+   || strpos($stkSrc, "require_once __DIR__ . '/lib/report.php'") !== false);
+ok('数字列表头带 class="n"',
+   preg_match('/<th>(数量|最近盘点|之后存入|账面上限|上一段用量)/u', $stkSrc . $nowSrc) === 0);
+// 账面 ≠ 实时库存，这句话必须留在页面上，不然一定会被当成现在冰箱里的量
+ok('页面写明账面不是实时库存',
+   strpos($nowSrc, '不等于「现在冰箱里有多少」') !== false);
+// 库存和采购是两本账，程序里不做对应 —— 别让人「顺手」接起来
+ok('库存那侧不引用采购逻辑',
+   strpos($stkSrc, 'Meat::') === false && strpos($nowSrc, 'Meat::') === false);
+ok('库存逻辑层也不引用采购逻辑',
+   strpos((string) file_get_contents(__DIR__ . '/../lib/stock.php'), 'Meat::') === false);
 
 // =====================================================================
 echo "\n【2e2b】期间对比\n";

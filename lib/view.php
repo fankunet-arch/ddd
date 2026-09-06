@@ -81,6 +81,7 @@ function pageHeader(string $title, string $active): void
       'dish'    => ['dish.php',    '菜品点单统计', '菜品'],
       'station' => ['station.php', '岗位单量排名', '岗位'],
       'meat'    => ['meat.php',    '肉类采购',     '采购'],
+      'stock'   => ['stock.php',   '库存盘点',     '库存'],
   ];
   ?>
   <nav class="tabs">

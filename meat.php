@@ -192,12 +192,12 @@ pageHeader('肉类采购', 'meat');
   </h3>
 
   <div class="row">
-    <label>日期 <span class="req">*</span>
+    <label><span class="cap">日期 <span class="req">*</span></span>
       <input type="date" name="purchase_date" required
              value="<?= $fv('purchase_date', q('d', $today)) ?>">
       <?php if (isset($errors['purchase_date'])): ?><em class="fe"><?= h($errors['purchase_date']) ?></em><?php endif; ?>
     </label>
-    <label>品类 <span class="req">*</span>
+    <label><span class="cap">品类 <span class="req">*</span></span>
       <select name="kind" required>
         <option value="">请选择…</option>
         <?php foreach ($kinds as $code => $name): ?>
