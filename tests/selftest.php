@@ -48,6 +48,127 @@ function throws(string $name, callable $fn): void
 }
 
 // =====================================================================
+echo "\n【0】铁律（见 注意事项.md）\n";
+// 这一组把「注意事项.md」里能机械检查的规矩变成测试。
+// 光写文档是会被忘的，写成测试才拦得住。
+// =====================================================================
+
+$ROOT = __DIR__ . '/..';
+$phpFiles = [];
+foreach (['', '/lib', '/tests'] as $dir) {
+    foreach ((array) glob($ROOT . $dir . '/*.php') as $f) {
+        $phpFiles[] = $f;
+    }
+}
+ok('扫到了程序文件', count($phpFiles) >= 15);
+
+// ---- 铁律一：全程序只有 lib/db.php 一个数据库出口 ----
+$dbOut = [];
+foreach ($phpFiles as $f) {
+    $base = basename($f);
+    if ($base === 'db.php' || $base === 'env.php') {
+        continue;                       // db.php 是唯一出口；env.php 只做扩展探测
+    }
+    $src = (string) file_get_contents($f);
+    if (preg_match('/\bnew\s+(PDO|mysqli)\b|\bmysqli_connect\s*\(/i', $src)) {
+        $dbOut[] = $base;
+    }
+}
+eq('除 lib/db.php 外没有第二个数据库出口', $dbOut, []);
+
+// ---- 铁律一：Db 不许提供写入口 ----
+$dbSrc = (string) file_get_contents($ROOT . '/lib/db.php');
+foreach (['exec', 'beginTransaction', 'multi_query', 'prepare_multi'] as $bad) {
+    ok("Db 没有暴露 {$bad}()", !preg_match('/function\s+' . $bad . '\s*\(/i', $dbSrc));
+}
+ok('Db 只对外提供 select/selectOne',
+   preg_match('/public static function select\s*\(/', $dbSrc) === 1
+   && preg_match('/public static function selectOne\s*\(/', $dbSrc) === 1);
+ok('多语句执行被显式关掉', strpos($dbSrc, 'MYSQL_ATTR_MULTI_STATEMENTS') !== false);
+ok('每条 SQL 都要过只读检查', substr_count($dbSrc, 'assertReadOnly') >= 2);
+
+// ---- 铁律二：将来加自有存储时，写操作必须在 Db 之外 ----
+// 现在还没有 Store 类；这条检查是给以后立的桩：一旦有人给 Db 加了写方法，
+// 或者在页面里直接建连接，上面两条会先失败。这里再补一条：
+// 页面文件里不许出现建表/写库语句。
+foreach ($phpFiles as $f) {
+    $base = basename($f);
+    if (in_array($base, ['selftest.php', 'db.php'], true)) {
+        continue;                       // 自检脚本本身要写这些字符串来做测试
+    }
+    $src = (string) file_get_contents($f);
+    ok("{$base} 不含写库语句",
+       !preg_match('/\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+TABLE)\b/i', $src));
+}
+
+// ---- 铁律三：功能默认值必须在 settings.php，config.php 不许重复 ----
+$defaults = require $ROOT . '/lib/settings.php';
+$shipCfg  = require $ROOT . '/config.php';
+$dup = array_intersect(array_keys($defaults), array_keys($shipCfg));
+eq('随包 config.php 不重复功能参数', $dup, []);
+// 每个页面读到的功能参数，都必须在 settings.php 里有默认值
+$usedKeys = [];
+foreach (['/index.php', '/dish.php', '/station.php', '/open.php', '/compare.php',
+          '/lib/biz.php', '/lib/ack.php', '/lib/report.php', '/lib/view.php'] as $f) {
+    // 只认 $cfg['x'] 和 config()['x']。用单引号字符串写正则，双引号里 \$ 的转义
+    // 极易写错 —— 这条断言第一版就写成了 /\\$cfg/（$cfg 前面多一个反斜杠），
+    // 永远匹配不到任何东西，等于没检查。用 . 匹配引号，省掉一层转义。
+    if (preg_match_all('/\\$cfg\\[.([a-z_]+).\\]|config\\(\\)\\[.([a-z_]+).\\]/',
+                       (string) file_get_contents($ROOT . $f), $m)) {
+        foreach (array_merge($m[1], $m[2]) as $k) {
+            if ($k !== '') { $usedKeys[$k] = true; }
+        }
+    }
+}
+$siteOnly = ['host', 'port', 'dbname', 'user', 'pass', 'charset', 'password'];
+$missing = array_diff(array_keys($usedKeys), array_keys($defaults), $siteOnly);
+eq('页面用到的功能参数都在 settings.php 里有默认值', array_values($missing), []);
+
+// ---- 铁律四：时区必须显式设定 ----
+ok('settings.php 有 timezone', array_key_exists('timezone', $defaults));
+ok('读配置时会套用时区', strpos($dbSrc, 'date_default_timezone_set') !== false);
+
+// ---- 铁律五：不许 JOIN ----
+// 真去生成一遍 SQL 来查，不能写成 ok(..., true) 那种恒真的占位断言
+[$jf, $jt] = Biz::range('2026-01-01', '2026-01-05');
+$joinSqls = [
+    '营业额'   => Biz::buildSalesSql($jf, $jt, 'history_order_head')[0],
+    '菜品汇总' => Biz::buildDishTotalsSql($jf, $jt, 'history_order_detail')[0],
+    '单菜品'   => Biz::buildDishByDaySql($jf, $jt, 'history_order_detail', 431)[0],
+    '岗位单量' => Biz::buildStationSql($jf, $jt, 'history_order_detail', [1 => 11])[0],
+    '开台列表' => Biz::buildOpenTablesSql(true)[0],
+    '套餐酒水' => Biz::buildComboCountSql([1], [1890], [431])[0],
+];
+foreach ($joinSqls as $label => $sqlText) {
+    ok("{$label} SQL 不含 JOIN", !preg_match('/\bjoin\b/i', $sqlText));
+    ok("{$label} SQL 未对时间列套函数",
+       !preg_match('/WHERE[^)]*\b(DATE|TIME|YEAR|MONTH)\s*\(\s*order_(start_)?time/i', $sqlText));
+}
+
+// ---- 铁律七：界面不能只靠颜色 ----
+$cmpSrc0 = (string) file_get_contents($ROOT . '/compare.php');
+ok('涨跌除颜色外还有箭头',
+   strpos($cmpSrc0, '▲') !== false && strpos($cmpSrc0, '▼') !== false);
+$cssSrc0 = (string) file_get_contents($ROOT . '/assets/app.css');
+ok('输入框字号不低于 16px',
+   preg_match('/input\[type=date\][^{]*\{[^}]*font-size:16px/s', $cssSrc0) === 1);
+
+// ---- 铁律八：手机与桌面共用同一个格式化函数 ----
+$openSrc0 = (string) file_get_contents($ROOT . '/open.php');
+ok('开台核对两套视图共用 $fmt',
+   substr_count($openSrc0, '$fmt($r)') >= 2 && substr_count($openSrc0, '$fmt = static function') === 1);
+
+// ---- 注意事项文档本身要在 ----
+ok('注意事项.md 存在', is_file($ROOT . '/注意事项.md'));
+$rules = (string) file_get_contents($ROOT . '/注意事项.md');
+foreach (['绝对不碰主数据库', '必须和主库彻底分开', '配置分两层',
+          '时区必须和 POS 一致', '每次只统计一张表', '不能只靠颜色'] as $kw) {
+    ok("注意事项.md 写了「{$kw}」", strpos($rules, $kw) !== false);
+}
+ok('README 指向注意事项.md',
+   strpos((string) file_get_contents($ROOT . '/README.md'), '注意事项.md') !== false);
+
+// =====================================================================
 echo "\n【1】只读防线\n";
 // =====================================================================
 
