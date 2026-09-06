@@ -161,6 +161,11 @@ foreach ($rows as $r) {
 pageHeader('肉类采购', 'meat');
 ?>
 
+<nav class="subtabs">
+  <a href="meat.php" class="on">录入与明细</a>
+  <a href="meatweek.php">周报表</a>
+</nav>
+
 <?php if ($storeErr): ?>
   <p class="err"><strong>数据文件不可用：</strong><?= h($storeErr) ?><br>
     数据文件路径：<code><?= h(Store::path()) ?></code><br>

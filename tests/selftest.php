@@ -842,7 +842,7 @@ foreach ([[$dAgo(20), 'salmon'], [$dAgo(10), 'beef'], [$dAgo(2), 'salmon']] as [
     [$cc, ] = Meat::validate(['purchase_date' => $d, 'kind' => $k, 'weight_kg' => '5']);
     Meat::create($cc);
 }
-eq('按日期范围筛', count(Meat::listRows(['from' => $dAgo(5), 'to' => '2026-09-15'])), 1);
+eq('按日期范围筛', count(Meat::listRows(['from' => $dAgo(5), 'to' => date('Y-m-d', strtotime('+5 day'))])), 1);
 eq('按品类筛', count(Meat::listRows(['kind' => 'salmon'])), 2);
 eq('列表按日期倒序', Meat::listRows()[0]['purchase_date'], $dAgo(2));
 [$cc, ] = Meat::validate(['purchase_date' => $dAgo(1), 'kind' => 'beef', 'unit_count' => '2',
@@ -863,6 +863,80 @@ ok('数据目录不可写时给出明确提示', strpos($meatSrc, 'store_path') 
 ok('用到 Report 就 require 了 report.php',
    strpos($meatSrc, 'Report::') === false
    || strpos($meatSrc, "require_once __DIR__ . '/lib/report.php'") !== false);
+
+// =====================================================================
+echo "\n【2e2a2】肉类周报表的聚合\n";
+// =====================================================================
+
+// ---- 周的边界：周一到周日（用户选的），跨年也不能错 ----
+eq('周日归上一周', Meat::weekKey('2026-09-06'), '2026-36');
+eq('周一开新的一周', Meat::weekKey('2026-09-07'), '2026-37');
+eq('周的起止是周一到周日', Meat::weekRange('2026-36'), ['2026-08-31', '2026-09-06']);
+// 跨年最容易写错：2021-01-01 是周五，属于 2020 年的第 53 周
+eq('元旦可能属于上一年的最后一周', Meat::weekKey('2021-01-01'), '2020-53');
+eq('跨年周的起止跨两个年份', Meat::weekRange('2020-53'), ['2020-12-28', '2021-01-03']);
+eq('日期无法解析时返回空串', Meat::weekKey('乱写'), '');
+
+$wk = Meat::recentWeeks(4, '2026-09-06');
+eq('取近 4 周就是 4 个', count($wk), 4);
+eq('最后一个是本周', $wk[3], '2026-36');
+eq('第一个是三周前', $wk[0], '2026-33');
+
+// ---- 按周汇总：实测重量和估算重量必须分开存 ----
+$uwk = ['salmon' => ['unit' => 'piece', 'per' => 4.0, 'n' => 5, 'min' => 3.5, 'max' => 4.5]];
+$rowsW = [
+    // 同一周两笔三文鱼，一笔实测一笔只有条数
+    ['purchase_date' => '2026-08-31', 'kind' => 'salmon', 'weight_kg' => 10.0,
+     'unit_count' => null, 'unit_type' => null, 'total_price' => 150.0, 'deleted_at' => null],
+    ['purchase_date' => '2026-09-02', 'kind' => 'salmon', 'weight_kg' => null,
+     'unit_count' => 2.0, 'unit_type' => 'piece', 'total_price' => null, 'deleted_at' => null],
+    // 牛肉：没有条重样本，缺重量 → 只能记成「缺重量」，不许编数字
+    ['purchase_date' => '2026-09-02', 'kind' => 'beef', 'weight_kg' => null,
+     'unit_count' => 1.0, 'unit_type' => 'pack', 'total_price' => 40.0, 'deleted_at' => null],
+    // 上一周
+    ['purchase_date' => '2026-08-25', 'kind' => 'salmon', 'weight_kg' => 6.0,
+     'unit_count' => null, 'unit_type' => null, 'total_price' => 90.0, 'deleted_at' => null],
+    // 已作废的不该进统计
+    ['purchase_date' => '2026-08-25', 'kind' => 'salmon', 'weight_kg' => 99.0,
+     'unit_count' => null, 'unit_type' => null, 'total_price' => 999.0, 'deleted_at' => '2026-08-26'],
+];
+$agg = Meat::weekly($rowsW, $uwk);
+eq('归成两周', count($agg), 2);
+eq('周按时间正序', array_keys($agg), ['2026-35', '2026-36']);
+eq('实测重量单独算', $agg['2026-36']['kg'], 10.0);
+eq('估算重量单独算（2 条 × 4kg）', $agg['2026-36']['kg_est'], 8.0);
+eq('记下有几笔是估算的', $agg['2026-36']['est_rows'], 1);
+eq('缺重量的单独计数', $agg['2026-36']['no_kg'], 1);
+eq('缺总价的单独计数', $agg['2026-36']['no_money'], 1);
+eq('金额只算填了总价的', $agg['2026-36']['money'], 190.0);
+eq('按品类也分开', round($agg['2026-36']['kinds']['salmon']['kg_est'], 1), 8.0);
+eq('作废的不进统计', $agg['2026-35']['kg'], 6.0);
+eq('作废的金额也不进', $agg['2026-35']['money'], 90.0);
+
+// ---- 滚动平均 ----
+$roll = Meat::rolling(['a' => 10.0, 'b' => 20.0, 'c' => 30.0, 'd' => 40.0, 'e' => 50.0], 3);
+eq('不足窗口时用已有的几周', array_values($roll), [10.0, 15.0, 20.0, 30.0, 40.0]);
+// null = 那一周没数据。当成 0 会把均值拉低，下一周就成了假的「暴涨」
+$rollN = Meat::rolling(['a' => 10.0, 'b' => null, 'c' => 20.0], 3);
+eq('没数据的周被跳过而不是当 0', $rollN['c'], 15.0);
+eq('窗口内全没数据就返回 null', Meat::rolling(['a' => null, 'b' => null], 2)['b'], null);
+
+// ---- 页面：两边分别查、内存里合并，不许 JOIN ----
+$mwSrc = (string) file_get_contents(__DIR__ . '/../meatweek.php');
+ok('周报表要求登录', strpos($mwSrc, 'Auth::requireLogin()') !== false);
+ok('周报表不写任何东西', preg_match('/\b(INSERT|UPDATE|DELETE|CREATE)\b/i', $mwSrc) === 0);
+ok('自有数据走 Store', strpos($mwSrc, 'Meat::listRows') !== false);
+ok('主库只走 Biz 的只读查询', strpos($mwSrc, 'Biz::salesByDay') !== false);
+// 页面自己一句 SQL 都不写，查询全在 Biz（主库只读）和 Meat（自有库）里 ——
+// 没有 SQL 就没有把两边写进同一条语句的机会
+ok('周报表页自己不拼 SQL', strpos($mwSrc, 'SELECT ') === false);
+// 主库挂了不该连采购数据一起看不见 —— 采购是自有的
+ok('主库失败被单独捕获', strpos($mwSrc, 'catch (Throwable $e)') !== false
+   && strpos($mwSrc, '$posErr') !== false);
+ok('数字列表头带 class="n"', preg_match('/<th>(合计 kg|采购额|人均 g|占营业额)/u', $mwSrc) === 0);
+// 采购 ≠ 消耗：这句必须留在页面上，不然看的人会把进货节奏当成浪费
+ok('页面写明统计的是采购量不是消耗量',
+   strpos($mwSrc, '不是「实际消耗量」') !== false);
 
 // =====================================================================
 echo "\n【2e2b】期间对比\n";

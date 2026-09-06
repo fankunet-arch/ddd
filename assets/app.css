@@ -51,6 +51,15 @@ code{background:#eef1f5;padding:1px 5px;border-radius:4px;font-size:.88em;
 .tabs a.on{color:#fff;background:#2f3d51;border-bottom-color:var(--accent)}
 .tabs .sm{display:none}
 
+/* 页内子标签（如 肉类采购 → 录入 / 周报表） */
+.subtabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}
+/* 手指点得到：高度不低于 38px（低于这个值在手机上很难点准） */
+.subtabs a{font-size:13px;display:inline-flex;align-items:center;min-height:38px;
+  padding:0 16px;border-radius:999px;
+  border:1px solid var(--line);color:var(--dim);background:var(--panel)}
+.subtabs a:hover{color:var(--text);border-color:#c3ccd8;text-decoration:none}
+.subtabs a.on{color:#fff;background:var(--accent);border-color:var(--accent)}
+
 main{max-width:1240px;margin:22px auto 60px;padding:0 20px}
 h2{font-size:16px;margin:30px 0 12px;display:flex;align-items:center;gap:10px}
 h2::after{content:"";flex:1;height:1px;background:var(--line)}
@@ -325,6 +334,8 @@ tr.acked td .state,tr.acked td .btn-mini{opacity:1}
   border-radius:var(--radius)}
 .empty{color:var(--dim);padding:34px 20px;text-align:center;background:var(--panel);
   border:1px dashed var(--line);border-radius:var(--radius)}
+/* 空状态里那条链接往往是这一页唯一能点的东西，得撑到能点得准 */
+.empty a{display:inline-flex;align-items:center;min-height:38px;padding:0 14px}
 .note{font-size:12.5px;color:var(--dim);margin:10px 0 0;line-height:1.7}
 .meta{font-size:12px;color:var(--dim2);margin:16px 0 0;line-height:1.8}
 .foot{max-width:1240px;margin:0 auto 30px;padding:0 20px;font-size:12px;color:var(--dim2)}

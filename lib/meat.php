@@ -394,6 +394,125 @@ final class Meat
         return $out;
     }
 
+    // ------------------------------------------------------------------
+    // 按周聚合
+    // ------------------------------------------------------------------
+
+    /** ISO 周编号：周一为一周之始（西班牙／欧洲的惯例） */
+    public static function weekKey(string $date): string
+    {
+        $t = strtotime($date);
+        return $t === false ? '' : date('o-W', $t);   // 例 2026-36
+    }
+
+    /** 某个 ISO 周的起止日期 [周一, 周日] */
+    public static function weekRange(string $key): array
+    {
+        [$y, $w] = array_map('intval', explode('-', $key) + [1 => 0]);
+        $mon = new DateTime();
+        $mon->setISODate($y, $w, 1);
+        $sun = (clone $mon)->modify('+6 day');
+        return [$mon->format('Y-m-d'), $sun->format('Y-m-d')];
+    }
+
+    /** 最近 N 周的周编号，从早到晚；最后一个是本周 */
+    public static function recentWeeks(int $n, ?string $today = null): array
+    {
+        $today = $today ?? date('Y-m-d');
+        $out = [];
+        for ($i = $n - 1; $i >= 0; $i--) {
+            $out[] = self::weekKey(date('Y-m-d', strtotime($today . " -{$i} week")));
+        }
+        return array_values(array_unique($out));
+    }
+
+    /**
+     * 把采购记录按「周 × 品类」汇总。
+     *
+     * 重量分成实测和估算两份分开累加 —— 报表上要能说清「这里面有多少是估的」，
+     * 混在一个数里就没法判断可不可信了。
+     *
+     * @param array $rows Meat::listRows() 的结果（未作废的）
+     * @param array $uw   Meat::unitWeights() 的结果
+     * @return array week => ['kinds' => [kind => [...]], 'kg'=>, 'kg_est'=>,
+     *                        'money'=>, 'rows'=>, 'est_rows'=>, 'no_kg'=>, 'no_money'=>]
+     */
+    public static function weekly(array $rows, array $uw): array
+    {
+        $out = [];
+        foreach ($rows as $r) {
+            if (($r['deleted_at'] ?? null) !== null) {
+                continue;
+            }
+            $wk = self::weekKey((string) $r['purchase_date']);
+            if ($wk === '') {
+                continue;
+            }
+            $kind = (string) $r['kind'];
+            if (!isset($out[$wk])) {
+                $out[$wk] = ['kinds' => [], 'kg' => 0.0, 'kg_est' => 0.0, 'money' => 0.0,
+                             'rows' => 0, 'est_rows' => 0, 'no_kg' => 0, 'no_money' => 0];
+            }
+            if (!isset($out[$wk]['kinds'][$kind])) {
+                $out[$wk]['kinds'][$kind] = ['kg' => 0.0, 'kg_est' => 0.0, 'money' => 0.0,
+                                             'rows' => 0, 'no_kg' => 0];
+            }
+            $out[$wk]['rows']++;
+            $out[$wk]['kinds'][$kind]['rows']++;
+
+            [$w, $isEst] = self::statWeight($r, $uw);
+            if ($w === null) {
+                $out[$wk]['no_kg']++;
+                $out[$wk]['kinds'][$kind]['no_kg']++;
+            } elseif ($isEst) {
+                $out[$wk]['kg_est'] += $w;
+                $out[$wk]['kinds'][$kind]['kg_est'] += $w;
+                $out[$wk]['est_rows']++;
+            } else {
+                $out[$wk]['kg'] += $w;
+                $out[$wk]['kinds'][$kind]['kg'] += $w;
+            }
+
+            if (($r['total_price'] ?? null) !== null) {
+                $out[$wk]['money'] += (float) $r['total_price'];
+                $out[$wk]['kinds'][$kind]['money'] += (float) $r['total_price'];
+            } else {
+                $out[$wk]['no_money']++;
+            }
+        }
+        ksort($out);
+        return $out;
+    }
+
+    /**
+     * 滚动平均：把进货节奏的波动抹平。
+     *
+     * 用多少买多少的时候采购≈消耗；一旦开始备货，某一周进一大批、下一周不进，
+     * 单看每周会忽高忽低，看起来像浪费其实只是节奏。取连续几周的平均更接近真实。
+     *
+     * null 表示【那一周没数据】（POS 没查到人数、或本周还没过完），
+     * 会被跳过而不是当成 0 —— 当成 0 会把均值硬生生拉低，
+     * 于是下一周看起来「暴涨」，是假警报。整个窗口都没数据时返回 null。
+     *
+     * @param array $series 有序的 [周 => 数值|null]
+     * @param int   $win    窗口周数
+     * @return array 周 => 滚动平均值|null（不足窗口时用已有的几周平均）
+     */
+    public static function rolling(array $series, int $win = 4): array
+    {
+        $keys = array_keys($series);
+        $out  = [];
+        foreach ($keys as $i => $k) {
+            $from  = max(0, $i - $win + 1);
+            $slice = array_filter(
+                array_slice($series, $from, $i - $from + 1),
+                static fn($v) => $v !== null
+            );
+            $out[$k] = $slice ? array_sum($slice) / count($slice) : null;
+        }
+        return $out;
+    }
+
     /** 样本少于这个数就不估算 —— 两三条数据算出来的系数没有意义 */
     public const MIN_SAMPLES = 3;
 
