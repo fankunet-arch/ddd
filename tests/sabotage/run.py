@@ -114,6 +114,18 @@ CASES = [
                   'public static function itemLabel(string $code): string\n    {\n        Meat::kinds();', 1))),
     ('当前库存页长出写库语句',
      lambda r: append(r, 'stocknow.php', '\n<?php $sql = "UPDATE stock_move SET qty = 0"; ?>\n')),
+    ('mode 写错时默认成「存入即用量」（本该盘的品类会悄悄不盘）',
+     lambda r: edit(r, 'lib/stock.php', lambda s: s.replace(
+         "$mode === self::MODE_DIRECT ? self::MODE_DIRECT : self::MODE_COUNT",
+         "$mode === self::MODE_COUNT ? self::MODE_COUNT : self::MODE_DIRECT", 1))),
+    ('允许给「存入即用量」的品类记盘点',
+     lambda r: edit(r, 'lib/stock.php', lambda s: s.replace(
+         "if ($kind === self::COUNT && self::isDirect($item)) {",
+         "if (false) {", 1))),
+    ('盘点进度把不盘点的品类也算进「还差」',
+     lambda r: edit(r, 'lib/stock.php', lambda s: s.replace(
+         "$missing   = array_values(array_diff($needCount, $done));",
+         "$missing   = array_values(array_diff(array_keys(self::items()), $done));", 1))),
     ('数据文件落在网站目录里也不报警',
      lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
          "return ($d === $r || strncmp($d, $r . '/', strlen($r) + 1) === 0) ? $doc : null;",

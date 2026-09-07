@@ -118,6 +118,27 @@ chk "缺 CSRF 被拒" "$r" '表单已过期'
 r=$(post "act=save&move_kind=in&happened_date=$D0&happened_time=11:00&item=salmon_fillet&qty=2,5")
 chk "西语逗号小数被识别" "$r" '2.5箱'
 
+echo "— 场景A：混合口径（atun 数不清，只记存入）—"
+p=$(get "stock.php")
+chk "下拉里标出了口径" "$p" '存入即用量'
+chk "表单说明点名了这些品类" "$p" 'Atún'
+r=$(post "act=save&move_kind=count&happened_date=$D0&happened_time=11:00&item=atun&qty=5")
+chk "给它记盘点被拒" "$r" '不参与盘点'
+r=$(post "act=save&move_kind=in&happened_date=$D1&happened_time=11:00&item=atun&qty=6")
+chk "存入照常可以" "$r" '已记录'
+r=$(post "act=save&move_kind=in&happened_date=$D0&happened_time=11:00&item=atun&qty=4")
+chk "再存一笔" "$r" '已记录'
+n=$(get "stocknow.php")
+chk "单独一张表列出来" "$n" '各品类现状（存入即用量）'
+chk "近 7 天用量 = 6 + 4" "$n" '<td class="n strong">10</td>'
+chk "写明这几列是用量不是库存" "$n" '不是库存'
+chk "写明代价" "$n" '看不出还剩多少'
+nochk "不会被当成「从没盘过」的异常" "$n" '只存入过，没盘过'
+# 盘点进度里不该老提示「还差 Atún」—— 它本来就不盘
+post "act=save&move_kind=count&happened_date=$D0&happened_time=20:00&item=salmon_fillet&qty=3" >/dev/null
+p=$(get "stock.php?at=$D0+20%3A00")
+nochk "盘点进度不提示还差 Atún" "$p" '还差.*Atún'
+
 echo "— 场景6：改与删 —"
 id=$(get "stock.php" | grep -o 'edit=[0-9]*' | head -1 | cut -d= -f2)
 r=$(post "act=save&id=$id&move_kind=in&happened_date=$D0&happened_time=11:00&item=salmon_fillet&qty=9")

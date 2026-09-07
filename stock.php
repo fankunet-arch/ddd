@@ -30,6 +30,9 @@ $cfg     = Db::config();
 $today   = date('Y-m-d', time() - (int) $cfg['day_cut_hour'] * 3600);
 $items   = Stock::items();
 $moments = Stock::moments();
+// 「存入即用量」的品类名单，表单说明里要点名，不然没人知道为什么它们不能盘
+$direct  = array_map(static fn($m) => $m['name'],
+    array_filter($items, static fn($m) => $m['mode'] === Stock::MODE_DIRECT));
 
 // 筛选条件
 $fFrom = q('from', date('Y-m-d', strtotime($today . ' -14 day')));
@@ -257,7 +260,9 @@ pageHeader('库存', 'stock');
         <option value="">请选择…</option>
         <?php foreach ($items as $code => $m): ?>
           <option value="<?= h($code) ?>" <?= ($form['item'] ?? '') === $code ? 'selected' : '' ?>>
-            <?= h($m['name']) ?><?= $m['unit'] !== '' ? '（' . h($m['unit']) . '）' : '' ?></option>
+            <?= h($m['name']) ?><?= $m['unit'] !== '' ? '（' . h($m['unit']) . '）' : '' ?><?php
+            /* 口径直接写在选项里 —— 选完才被拒绝很烦，不如选之前就看见 */
+            if ($m['mode'] === Stock::MODE_DIRECT) { echo ' · 存入即用量'; } ?></option>
         <?php endforeach; ?>
       </select>
       <?php if (isset($errors['item'])): ?><em class="fe"><?= h($errors['item']) ?></em><?php endif; ?>
@@ -283,6 +288,12 @@ pageHeader('库存', 'stock');
     <strong>取出不用记</strong> —— 两次盘点之间少掉的就是取出量：
     <code>取出 = 上次盘点 + 期间存入 − 本次盘点</code>。
     比如原本 4 箱、今天存入 3 箱、盘点数出 5 箱，那就是用掉了 2 箱。
+    <?php if ($direct): ?>
+      <br>
+      标着 <strong>· 存入即用量</strong> 的品类（<?= h(implode('、', $direct)) ?>）
+      <strong>不参与盘点</strong> —— 它们切开之后大小不一、数不清，硬盘只会盘出假数字。
+      这些只记<strong>存入</strong>，进多少就算用掉多少。
+    <?php endif; ?>
   </p>
 </form>
 

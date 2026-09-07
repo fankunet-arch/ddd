@@ -1145,7 +1145,10 @@ Store::useMemoryForTests();
 $sIn('2026-09-06', '23:30', 'salmon_fillet', 'count', '5');
 $pg = Stock::countProgress('2026-09-06 23:30');
 eq('这一轮盘了 1 项', count($pg['done']), 1);
-eq('还差的项数 = 清单总数 − 已盘', count($pg['missing']), count(Stock::items()) - 1);
+// 只数「要盘的」品类 —— 走存入即用量的那些本来就不参与盘点
+$needCount = count(array_filter(Stock::items(),
+    static fn($m) => $m['mode'] === Stock::MODE_COUNT));
+eq('还差的项数 = 要盘的品类数 − 已盘', count($pg['missing']), $needCount - 1);
 eq('没有盘点的时刻返回 null', Stock::countProgress('2026-09-06 09:00'), null);
 
 // ---- 品类清单与单位 ----
@@ -1154,6 +1157,60 @@ eq('每个品类各自固定一个单位', Stock::itemUnit('salmon_fillet'), '�
 eq('时点有显示名', Stock::momentLabel('lunch_end'), '午市后');
 eq('未知时点不炸', Stock::momentLabel('不存在'), '');
 eq('未知品类退回代码本身', Stock::itemLabel('不存在'), '不存在');
+
+// ---- 混合口径：数不清的品类走「存入即用量」 ----
+// Atún 切成大小不一的小块，盘不出「还剩几块」。硬盘只会盘出假数字，
+// 所以这类品类只记存入、进多少算用多少。
+$mixItems = [
+    'boxed' => ['name' => '盒装货', 'unit' => '盒'],                        // 不写 mode = 盘点法
+    'atun'  => ['name' => 'Atún',   'unit' => 'kg', 'mode' => 'direct'],
+    'weird' => ['name' => '写错的', 'unit' => '包', 'mode' => '乱写的'],
+];
+Db::forTests(['stock_items' => $mixItems]);
+eq('不写 mode 默认走盘点法', Stock::itemMode('boxed'), Stock::MODE_COUNT);
+eq('direct 认得出来', Stock::itemMode('atun'), Stock::MODE_DIRECT);
+// 认不出的写法要退回【更严的】那一种。反过来的话，本该盘点的品类会悄悄不盘，
+// 而且毫无迹象，等发现时已经缺了几个月的盘点数据
+eq('mode 写错时退回盘点法', Stock::itemMode('weird'), Stock::MODE_COUNT);
+ok('isDirect 只对 direct 为真',
+   Stock::isDirect('atun') && !Stock::isDirect('boxed') && !Stock::isDirect('weird'));
+eq('未知品类按盘点法', Stock::itemMode('不存在'), Stock::MODE_COUNT);
+
+$dBase = ['happened_date' => $dAgo(1), 'happened_time' => '11:00', 'qty' => '3'];
+[, $e] = Stock::validate($dBase + ['item' => 'atun', 'move_kind' => 'count']);
+ok('存入即用量的品类不许盘点', isset($e['item']));
+ok('拒绝时说清了该改选什么', strpos($e['item'] ?? '', '存入') !== false);
+[, $e] = Stock::validate($dBase + ['item' => 'atun', 'move_kind' => 'in']);
+eq('这类品类照常可以存入', $e, []);
+[, $e] = Stock::validate($dBase + ['item' => 'boxed', 'move_kind' => 'count']);
+eq('盘点法的品类照常可以盘点', $e, []);
+
+// ---- 存入即用量：用量就是存入量 ----
+Store::useMemoryForTests();
+$sIn(date('Y-m-d', strtotime('-40 day')), '11:00', 'atun', 'in', '5');   // 30 天外
+$sIn(date('Y-m-d', strtotime('-10 day')), '11:00', 'atun', 'in', '4');   // 30 天内、7 天外
+$sIn(date('Y-m-d', strtotime('-2 day')),  '11:00', 'atun', 'in', '2');
+$sIn(date('Y-m-d'),                       '11:00', 'atun', 'in', '1');
+$ca = Stock::current()['atun'];
+ok('标成 direct', $ca['direct']);
+eq('近 7 天用量 = 2 + 1', $ca['in_7'], 3.0);
+eq('近 30 天用量 = 4 + 2 + 1', $ca['in_30'], 7.0);
+eq('累计用量 = 全部存入', $ca['in_total'], 12.0);
+eq('记下最近一次存入的时间', substr((string) $ca['last_in_at'], 0, 10), date('Y-m-d'));
+// 这类品类没有「剩多少」这回事，别给出一个会被当成库存的数字
+eq('没有账面结存', $ca['book'], null);
+eq('没有分段用量', count($ca['periods']), 0);
+ok('不标成「从没盘过」的异常', !$ca['counted']);
+
+// ---- 盘点进度不该老提示「还差 Atún」 ----
+Store::useMemoryForTests();
+$sIn($dAgo(1), '23:30', 'boxed', 'count', '5');
+$sIn($dAgo(1), '23:30', 'weird', 'count', '2');   // mode 写错的那个也算盘点法
+$pg = Stock::countProgress($dAgo(1) . ' 23:30');
+eq('盘完盘点法的品类就算齐了', $pg['missing'], []);
+ok('不把不盘点的品类算进「还差」', !in_array('atun', $pg['missing'], true));
+Db::forTests(null);
+Store::useMemoryForTests();
 
 // ---- 页面与铁律 ----
 $stkSrc = (string) file_get_contents(__DIR__ . '/../stock.php');
