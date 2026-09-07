@@ -63,6 +63,16 @@ function storeBanner(): void
     if (!class_exists('Store')) {
         return;                       // 不用自有存储的页面，什么都不做
     }
+
+    // 选址／搬迁做了什么，说一声。程序自己动了文件却不吭声，
+    // 下次有人发现数据不在老地方会以为出事了。
+    foreach (Store::notes() as [$level, $text]) {
+        printf('<p class="%s">%s%s</p>' . "\n",
+               $level === 'ok' ? 'okmsg' : 'err',
+               $level === 'ok' ? '<strong>数据文件已自动挪到安全位置：</strong><br>' : '',
+               h($text));
+    }
+
     $doc = Store::exposedUnder();
     if ($doc === null) {
         return;

@@ -71,9 +71,10 @@ CASES = [
          'public static function select(string $sql',
          'public static function posHack(): array { return self::select("SELECT 1 FROM history_order_head"); }\n'
          '    public static function select(string $sql', 1))),
-    ('把数据文件挪进网站目录',
+    ('把数据文件挪进程序目录（那通常就在网站里）',
      lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
-         "dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'data'", "__DIR__ . '/data'", 1))),
+         "$out[] = dirname($app) . DIRECTORY_SEPARATOR . self::DIR_NAME;",
+         "$out[] = $app . DIRECTORY_SEPARATOR . self::DIR_NAME;", 1))),
     ('自有存储那侧去引用主库查询',
      lambda r: edit(r, 'lib/meat.php', lambda s: s.replace(
          'return Store::selectOne(', 'Db::select("SELECT 1"); return Store::selectOne(', 1))),
@@ -126,6 +127,20 @@ CASES = [
      lambda r: edit(r, 'lib/stock.php', lambda s: s.replace(
          "$missing   = array_values(array_diff($needCount, $done));",
          "$missing   = array_values(array_diff(array_keys(self::items()), $done));", 1))),
+    ('自动选址不再避开网站可访问目录',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         'if (self::insideDocRoot($dir) !== null || !self::dirUsable($dir)) {',
+         'if (!self::dirUsable($dir)) {', 1))),
+    ('退回通用文件名 app.db（谁的库都分不出来）',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         "public const FILE_NAME = 'salesreport.db';",
+         "public const FILE_NAME = 'app.db';", 1))),
+    ('打开别人的数据库也照建表不误',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         "if ($who === 'foreign') {", 'if (false) {', 1))),
+    ('升级后不接管老位置的数据（看着就像数据全没了）',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         '            self::adoptLegacy($path);', '            /* nope */;', 1))),
     ('数据文件落在网站目录里也不报警',
      lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
          "return ($d === $r || strncmp($d, $r . '/', strlen($r) + 1) === 0) ? $doc : null;",
