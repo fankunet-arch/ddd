@@ -35,11 +35,16 @@ if (!$ready) {
     }
 }
 
-// 看哪个品类的分段用量（默认第一个有记录的）
+// 两种口径分开显示。混在一张表里的话，「账面上限」「上一段用量」这些列
+// 对「存入即用量」的品类根本没有意义 —— 同一列两种含义，一定会被读错。
+$byCount  = array_filter($cur, static fn($c) => !$c['direct']);
+$byDirect = array_filter($cur, static fn($c) => $c['direct']);
+
+// 看哪个品类的分段用量（只有盘点法的品类才有「段」）
 $pick = q('item');
-if ($pick === '' || !isset($cur[$pick])) {
+if ($pick === '' || !isset($byCount[$pick])) {
     $pick = '';
-    foreach ($cur as $code => $c) {
+    foreach ($byCount as $code => $c) {
         if ($c['periods']) { $pick = (string) $code; break; }
     }
 }
@@ -51,7 +56,9 @@ $staleHours = 48;
 $nCounted = 0;
 $nStale   = 0;
 $nNeg     = 0;
-foreach ($cur as $c) {
+// 「超 N 小时没盘」「用量负数」只对盘点法的品类有意义 ——
+// 把不盘点的品类算进去，等于天天报一个永远修不好的警
+foreach ($byCount as $c) {
     if ($c['counted']) {
         $nCounted++;
         if ($c['stale_h'] !== null && $c['stale_h'] > $staleHours) {
@@ -82,6 +89,11 @@ pageHeader('库存', 'stock');
   最近一次盘点之后又存入了多少是记着的，但<strong>那之后用掉了多少没人记</strong> ——
   要等下次盘点才知道。所以账面数是个<strong>上限</strong>，
   <strong>越久没盘，它离实际越远</strong>。要知道真实数量，就去盘一次。
+  <?php if ($byDirect): ?>
+    <br>
+    另有 <strong><?= num(count($byDirect)) ?></strong> 个品类走「<strong>存入即用量</strong>」口径
+    （数不清的那些），它们不盘点、也没有「剩多少」这个概念，单独列在下面。
+  <?php endif; ?>
 </p>
 
 <?php if ($nNeg > 0): ?>
@@ -95,7 +107,10 @@ pageHeader('库存', 'stock');
 <section class="cards">
   <div class="card total"><h3>品类</h3>
     <div class="big"><?= num(count($cur)) ?></div>
-    <dl><dt>已盘过</dt><dd><?= num($nCounted) ?> 项</dd></dl></div>
+    <dl><dt>盘点法</dt><dd><?= num(count($byCount)) ?> 项（已盘过 <?= num($nCounted) ?>）</dd>
+      <?php if ($byDirect): ?>
+        <dt>存入即用量</dt><dd><?= num(count($byDirect)) ?> 项</dd>
+      <?php endif; ?></dl></div>
   <div class="card <?= $nStale > 0 ? 'bad' : 'day' ?>"><h3>超过 <?= (int) $staleHours ?> 小时没盘</h3>
     <div class="big"><?= num($nStale) ?> <span style="font-size:14px">项</span></div></div>
   <div class="card <?= $nNeg > 0 ? 'bad' : 'gap' ?>"><h3>用量算成负数</h3>
@@ -103,7 +118,7 @@ pageHeader('库存', 'stock');
     <dl><dt>含义</dt><dd>漏记了存入</dd></dl></div>
 </section>
 
-<h2>各品类现状</h2>
+<h2>各品类现状（盘点法）</h2>
 <div class="tablewrap"><table class="grid stick">
   <thead><tr>
     <th>品类</th>
@@ -116,7 +131,7 @@ pageHeader('库存', 'stock');
     <th>状态</th>
   </tr></thead>
   <tbody>
-  <?php foreach ($cur as $code => $c):
+  <?php foreach ($byCount as $code => $c):
       $stale = $c['stale_h'] !== null && $c['stale_h'] > $staleHours;
       $lp    = $c['last_period'];
   ?>
@@ -167,6 +182,49 @@ pageHeader('库存', 'stock');
   「从没盘过」的品类算不出用量 —— 只有存入没有盘点，等于只知道进了多少，不知道剩多少。
 </p>
 
+<?php if ($byDirect): ?>
+<h2>各品类现状（存入即用量）</h2>
+<div class="tablewrap"><table class="grid stick">
+  <thead><tr>
+    <th>品类</th>
+    <th>最近存入</th>
+    <th class="n">近 7 天用量</th>
+    <th class="n">近 30 天用量</th>
+    <th class="n">累计用量</th>
+    <th class="n hide-sm">笔数</th>
+    <th>状态</th>
+  </tr></thead>
+  <tbody>
+  <?php foreach ($byDirect as $code => $c): ?>
+    <tr class="<?= $c['rows'] === 0 ? 'row-skip' : '' ?>">
+      <td><strong><?= h($c['name']) ?></strong>
+        <?php if ($c['unit'] !== ''): ?><span class="dim">（<?= h($c['unit']) ?>）</span><?php endif; ?></td>
+      <td class="date"><?= $c['last_in_at'] !== null
+            ? h(substr((string) $c['last_in_at'], 5, 11)) : '<span class="dim">—</span>' ?></td>
+      <td class="n strong"><?= $c['rows'] > 0 ? qty($c['in_7']) : '<span class="dim">—</span>' ?></td>
+      <td class="n"><?= $c['rows'] > 0 ? qty($c['in_30']) : '<span class="dim">—</span>' ?></td>
+      <td class="n dim"><?= $c['rows'] > 0 ? qty($c['in_total']) : '—' ?></td>
+      <td class="n hide-sm dim"><?= num($c['rows']) ?></td>
+      <td><?= $c['rows'] === 0
+            ? '<span class="state s-skip">还没记录</span>'
+            : '<span class="state s-ok">正常</span>' ?></td>
+    </tr>
+  <?php endforeach; ?>
+  </tbody>
+</table></div>
+<p class="note">
+  这几个品类<strong>不参与盘点</strong> —— 切开之后大小不一、数不清，
+  硬盘只会盘出假数字。所以口径是<strong>进多少就算用掉多少</strong>，
+  上面几列写的是<strong>用量</strong>，不是库存。
+  <br>
+  代价要清楚：这类品类<strong>看不出还剩多少，也看不出浪费</strong>。
+  哪天它变得数得清了（比如改成按固定规格的盒装进货），
+  把 <code>stock_items</code> 里那一项的 <code>'mode' =&gt; 'direct'</code> 去掉，
+  它就回到盘点法，<strong>历史记录照样在</strong>（清单在 <code>config.php</code>，
+  没写过就在 <code>lib/settings.php</code>）。
+</p>
+<?php endif; ?>
+
 <h2>分段用量</h2>
 <?php if ($pick === ''): ?>
   <p class="empty">还没有哪个品类盘过两次 —— <strong>至少要两次盘点才算得出用量</strong>。
@@ -177,7 +235,7 @@ pageHeader('库存', 'stock');
   <div class="row">
     <label>看哪个品类
       <select name="item" onchange="this.form.submit()">
-        <?php foreach ($cur as $code => $c): ?>
+        <?php foreach ($byCount as $code => $c): ?>
           <option value="<?= h((string) $code) ?>" <?= $pick === (string) $code ? 'selected' : '' ?>>
             <?= h($c['name']) ?><?= $c['periods'] ? '' : '（还算不出用量）' ?></option>
         <?php endforeach; ?>
@@ -188,9 +246,9 @@ pageHeader('库存', 'stock');
   </div>
 </form>
 
-<?php $ps = array_reverse($cur[$pick]['periods']); $u = $cur[$pick]['unit']; ?>
+<?php $ps = array_reverse($byCount[$pick]['periods']); $u = $byCount[$pick]['unit']; ?>
 <?php if (!$ps): ?>
-  <p class="empty"><?= h($cur[$pick]['name']) ?> 还没盘过两次，算不出用量。</p>
+  <p class="empty"><?= h($byCount[$pick]['name']) ?> 还没盘过两次，算不出用量。</p>
 <?php else: ?>
 <div class="tablewrap"><table class="grid stick">
   <thead><tr>

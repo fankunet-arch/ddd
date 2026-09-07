@@ -63,6 +63,16 @@ function storeBanner(): void
     if (!class_exists('Store')) {
         return;                       // 不用自有存储的页面，什么都不做
     }
+
+    // 选址／搬迁做了什么，说一声。程序自己动了文件却不吭声，
+    // 下次有人发现数据不在老地方会以为出事了。
+    foreach (Store::notes() as [$level, $text]) {
+        printf('<p class="%s">%s%s</p>' . "\n",
+               $level === 'ok' ? 'okmsg' : 'err',
+               $level === 'ok' ? '<strong>数据文件已自动挪到安全位置：</strong><br>' : '',
+               h($text));
+    }
+
     $doc = Store::exposedUnder();
     if ($doc === null) {
         return;
@@ -76,11 +86,38 @@ function storeBanner(): void
     <strong>谁把网址猜对了就能把整个数据库下载走</strong>，不需要登录，
     日志里也只是一次普通的静态文件请求，你不会发现。
     <br>
+    程序本来会自己挑一个网站访问不到的位置，这次没挑到 ——
+    多半是那几个候选目录都不可写。
+    <br>
     改法：在 <code>config.php</code> 里把 <code>store_path</code> 指到
-    <strong>网站根目录之外</strong>的路径，然后把已有的
-    <code>app.db</code>（连同 <code>app.db-wal</code>、<code>app.db-shm</code>，有就一起）
-    移过去，最后删掉旧目录。详见 README「七之三 · 数据存哪」。</p>
+    <strong>网站根目录之外</strong>的路径，然后把已有的数据文件
+    （<code><?= h(basename($path)) ?></code>，连同同名的
+    <code>-wal</code>、<code>-shm</code>，有就一起）移过去，最后删掉旧目录。
+    详见 README「七之三 · 数据存哪」。</p>
     <?php
+}
+
+/**
+ * 数据文件在哪、安不安全 —— 直接印在页面上。
+ *
+ * 「程序说它挑了个安全位置」和「你能看到它挑的是哪儿」是两回事。
+ * 印出来，出问题时一眼就能核，不用去翻服务器目录。
+ */
+function storeWhere(): string
+{
+    if (!class_exists('Store')) {
+        return '';
+    }
+    $p   = Store::path();
+    $doc = Store::exposedUnder();
+    if ($doc !== null) {
+        $tag = '<strong class="stale">⚠️ 在网站可访问目录里，请尽快挪走</strong>';
+    } elseif (Store::webRootUnknown()) {
+        $tag = '<span class="dim">（判断不出网站根目录，没法确认是否可被访问）</span>';
+    } else {
+        $tag = '<span class="state s-ok">网站访问不到</span>';
+    }
+    return '<code>' . h($p) . '</code> ' . $tag;
 }
 
 /** 金额格式化 */

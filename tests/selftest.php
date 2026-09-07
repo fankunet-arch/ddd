@@ -72,6 +72,22 @@ foreach ($phpFiles as $f) {
     if (in_array($base, ['db.php', 'store.php', 'env.php'], true)) {
         continue;                       // 两个出口 + env.php（只做扩展探测）
     }
+    if ($base === 'selftest.php') {
+        // 自检脚本要自己造一个「别人的数据库」来验证 Store 会拒绝打开它。
+        // 它不在网页那条链路上，但也不能因此放行 MySQL —— 单独查一道：
+        // 所有 new PDO 的 DSN 必须是 sqlite:，而且不许出现 mysqli。
+        // 关键词用拼接写，否则这几行自己会被自己的检查匹配到（第一版就栽在这）。
+        $sf = (string) file_get_contents($f);
+        preg_match_all('/new\\s+PDO\\s*\\(\\s*([\'"])(.*?)\\1/', $sf, $mm);
+        $badDsn = array_values(array_filter($mm[2],
+            static fn($d) => strncmp($d, 'sqlite:', 7) !== 0));
+        eq('自检脚本里的 PDO 全是 SQLite', $badDsn, []);
+        // 只找【真的实例化】：new + 空白 + mysqli + (。
+        // 单纯搜 "mysqli" 会命中上面那几行【用来检查别的文件的正则】，永远失败。
+        ok('自检脚本不实例化 mysqli',
+           preg_match('/new\\s+my' . 'sqli\\s*\\(/i', $sf) === 0);
+        continue;
+    }
     $src = (string) file_get_contents($f);
     if (preg_match('/\bnew\s+(PDO|mysqli)\b|\bmysqli_connect\s*\(/i', $src)) {
         $dbOut[] = $base;
@@ -83,7 +99,27 @@ $storeSrc = (string) file_get_contents($ROOT . '/lib/store.php');
 ok('Store 只连 SQLite', strpos($storeSrc, "'sqlite:'") !== false
    && !preg_match('/new\s+mysqli|mysqli_connect|mysql:host/i', $storeSrc));
 ok('Store 会拒绝非 sqlite 的 DSN', strpos($storeSrc, 'Store 只允许连接 SQLite') !== false);
-ok('数据文件默认放在程序目录之外', strpos($storeSrc, 'dirname(__DIR__, 2)') !== false);
+// 没配置 store_path 时，程序自己挑位置 —— 挑出来的必须在【程序目录之外】。
+// 光报警不解决问题：没人改配置的话，下一次还是往同一个地方建库。
+$docSaved0 = $_SERVER['DOCUMENT_ROOT'] ?? null;
+unset($_SERVER['DOCUMENT_ROOT']);
+require_once $ROOT . '/lib/store.php';
+Db::forTests(['store_path' => '']);
+Store::resetPathCache();
+$autoPath = Store::path();
+// $ROOT 是 __DIR__.'/..'，没规范化过；Store 返回的是规范路径。
+// 直接比前缀等于什么都没比 —— 这条断言第一版就是这么白跑的。
+$rootReal = (string) realpath($ROOT);
+ok('没配置时自动选的位置在程序目录之外',
+   $rootReal !== ''
+   && strncmp($autoPath, $rootReal . DIRECTORY_SEPARATOR, strlen($rootReal) + 1) !== 0);
+// 通用文件名（app.db）没法区分是谁的库 —— 用本程序专有的名字
+ok('用专有文件名而不是通用的 app.db',
+   basename($autoPath) === Store::FILE_NAME && Store::FILE_NAME !== 'app.db');
+ok('目录名也是专有的', basename(dirname($autoPath)) === Store::DIR_NAME);
+if ($docSaved0 !== null) { $_SERVER['DOCUMENT_ROOT'] = $docSaved0; }
+Db::forTests(null);
+Store::resetPathCache();
 // 跨源不许 JOIN：Store 的 SQL 里不许出现任何主库表名
 foreach (['history_order_head', 'history_order_detail', 'order_head', 'order_detail',
           'menu_item', 'print_class'] as $posTable) {
@@ -214,6 +250,130 @@ foreach ([$tmpRoot . '/sub/data', $tmpRoot . '/sub', $tmpRoot . '/data', $tmpRoo
     @rmdir($d);
 }
 
+// ---- 网站根的第二个来源：SCRIPT_FILENAME 减去 SCRIPT_NAME ----
+// nginx + PHP-FPM 某些配置下 DOCUMENT_ROOT 是空的。只认它的话，
+// 「在不在网站里」永远判不出来，于是什么位置都被当成安全的 —— 静默放行。
+$wr = sys_get_temp_dir() . '/selftest_wr_' . getmypid();
+@mkdir($wr . '/wwwroot/app', 0777, true);
+file_put_contents($wr . '/wwwroot/app/stock.php', '<?php');
+eq('从脚本路径反推出网站根',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', '/app/stock.php'),
+   realpath($wr . '/wwwroot'));
+eq('程序就在网站根时也推得对',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', '/stock.php'),
+   realpath($wr . '/wwwroot/app'));
+// 推不出来就说不知道，别硬凑一个 —— 凑错了比不知道更糟
+eq('对不上时返回 null',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', '/别的/路径.php'), null);
+eq('相对的 SCRIPT_NAME 不硬猜',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', 'app/stock.php'), null);
+eq('文件不存在时返回 null',
+   Store::deriveWebRoot($wr . '/没有这个文件.php', '/x.php'), null);
+eq('参数为空时返回 null', Store::deriveWebRoot('', ''), null);
+@unlink($wr . '/wwwroot/app/stock.php');
+foreach ([$wr . '/wwwroot/app', $wr . '/wwwroot', $wr] as $d) { @rmdir($d); }
+
+// ---- 自动选址：面板类主机的目录形状（程序在网站根【下面一层】）----
+// 这正是线上踩到的那种：老默认「程序目录上一级」算出来还在网站根里。
+$panel = sys_get_temp_dir() . '/selftest_panel_' . getmypid();
+@mkdir($panel . '/www/wwwroot/app/lib', 0777, true);
+$_SERVER['DOCUMENT_ROOT'] = $panel . '/www/wwwroot';
+// 假装程序就装在网站根下面一层 —— 这正是线上那台机器的形状
+Store::useAppRootForTests($panel . '/www/wwwroot/app');
+Db::forTests(['store_path' => '']);
+Store::resetPathCache();
+$auto = Store::path();
+eq('面板形状下选到网站根的上一级',
+   dirname($auto), $panel . '/www/' . Store::DIR_NAME);
+eq('选出来的位置不在网站可访问目录里', Store::exposedUnder(), null);
+
+// 首选位置被占住时，【不能】退而求其次选一个仍在网站目录里的地方。
+// 这里用「同名文件挡路」来制造首选不可用 —— 比改权限可靠（测试可能以 root 跑，
+// root 无视权限位，chmod 挡不住）。
+$blocked = $panel . '/www/' . Store::DIR_NAME;
+@rmdir($blocked);
+file_put_contents($blocked, 'x');       // 变成文件，占住名字
+Db::forTests(['store_path' => '']);
+Store::resetPathCache();
+$fallback = Store::path();
+// 次选是「程序目录的上一级」，在这种目录形状下仍在网站根里面 —— 不许选它
+// 次选是「程序目录的上一级」= 网站根本身，还在网站里 —— 不许选它
+ok('首选被占住时不会退到仍在网站目录里的次选',
+   dirname($fallback) !== $panel . '/www/wwwroot/' . Store::DIR_NAME);
+eq('挑不出来时退到程序目录旁边（并报警）',
+   dirname($fallback), $panel . '/www/wwwroot/app/' . Store::DIR_NAME);
+$noteTxt = implode(' ', array_column(Store::notes(), 1));
+ok('实在挑不出安全位置时会明确报警', strpos($noteTxt, '找不到网站访问不到的可写目录') !== false);
+unlink($blocked);
+
+// 显式配置优先，不自作主张改人家指定的路径
+Db::forTests(['store_path' => $panel . '/我指定的/x.db']);
+Store::resetPathCache();
+eq('配了 store_path 就照办', Store::path(), $panel . '/我指定的/x.db');
+
+// ---- 认库：不是本程序的文件就拒绝打开 ----
+$foreign = $panel . '/foreign.db';
+$fp = new PDO('sqlite:' . $foreign);
+$fp->exec('CREATE TABLE wp_posts (id INTEGER PRIMARY KEY)');
+$fp = null;
+Db::forTests(['store_path' => $foreign]);
+Store::resetPathCache();
+$refClass = new ReflectionClass('Store');
+$pdoProp  = $refClass->getProperty('pdo');
+$pdoProp->setAccessible(true);
+$pdoProp->setValue(null, null);
+ok('别人的数据库不打开', !Store::isReady());
+ok('说清了为什么不打开', strpos((string) Store::lastError(), '不是本程序的数据库') !== false);
+
+// 自己建的库能认出来，而且带上身份标记
+$mine = $panel . '/mine.db';
+Db::forTests(['store_path' => $mine]);
+Store::resetPathCache();
+$pdoProp->setValue(null, null);
+ok('自己的库正常打开', Store::isReady());
+eq('写上了身份标记',
+   Store::selectOne("SELECT v FROM app_meta WHERE k = 'app'")['v'], 'salesreport');
+$pdoProp->setValue(null, null);
+
+// ---- 接管老位置的数据：不搬的话升级后看着就像数据全没了 ----
+$legacyDir = $panel . '/www/data';
+@mkdir($legacyDir, 0777, true);
+$legacy = $legacyDir . '/app.db';
+// 用 Store 自己在老位置建一个【结构完整】的库，再塞一条数据。
+// 手写一张只有两列的假表是不行的：接管之后要跑建表脚本，
+// 建索引会因为缺列而失败 —— 那是测试数据太糙，不是程序的问题。
+Db::forTests(['store_path' => $legacy]);
+Store::resetPathCache();
+$pdoProp->setValue(null, null);
+Store::run("INSERT INTO meat_purchase (purchase_date, kind, weight_kg, created_at, updated_at)
+            VALUES ('2026-01-01', 'salmon', 5, 't', 't')");
+$pdoProp->setValue(null, null);
+
+Db::forTests(['store_path' => '']);
+Store::resetPathCache();
+$pdoProp->setValue(null, null);
+$target = Store::path();
+@unlink($target);
+ok('接管前新位置还没有文件', !is_file($target));
+ok('打开时接管了老数据', Store::isReady());
+eq('老数据搬过来了',
+   (int) Store::selectOne('SELECT COUNT(*) c FROM meat_purchase')['c'], 1);
+ok('老位置的文件已经不在了（它在网站能访问到的地方）', !is_file($legacy));
+$msg = implode(' ', array_column(Store::notes(), 1));
+ok('搬完告诉了人一声', strpos($msg, '搬到') !== false);
+$pdoProp->setValue(null, null);
+
+// 收尾
+if ($docSaved !== null) { $_SERVER['DOCUMENT_ROOT'] = $docSaved; } else { unset($_SERVER['DOCUMENT_ROOT']); }
+Store::useAppRootForTests(null);
+Db::forTests(null);
+Store::resetPathCache();
+foreach ([$foreign, $mine, $target, $target . '-wal', $target . '-shm'] as $f) { @unlink($f); }
+foreach ([dirname($target), $legacyDir, $panel . '/我指定的',
+          $panel . '/www/wwwroot/app/lib', $panel . '/www/wwwroot/app',
+          $panel . '/www/wwwroot', $panel . '/www', $panel] as $d) { @rmdir($d); }
+Store::useMemoryForTests();
+
 // 四个用到自有存储的页面都要报警 —— 漏掉一页，部署的人就可能一直以为没事
 foreach (['meat.php', 'meatweek.php', 'stock.php', 'stocknow.php'] as $pg) {
     ok("{$pg} 会提示数据文件放错位置",
@@ -222,8 +382,16 @@ foreach (['meat.php', 'meatweek.php', 'stock.php', 'stocknow.php'] as $pg) {
 ok('警告里写清了怎么改',
    strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'store_path') !== false);
 // WAL 模式下还有两个附属文件，只搬走主文件会丢最近的写入
+$viewSrc = (string) file_get_contents($ROOT . '/lib/view.php');
 ok('警告里提醒了 -wal / -shm 也要一起搬',
-   strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'app.db-wal') !== false);
+   strpos($viewSrc, '-wal') !== false && strpos($viewSrc, '-shm') !== false);
+// 页面上要印出【实际用的路径】和安全判定 —— 光说「我挑了个安全位置」不够，
+// 得让人一眼能核，这次就是因为看不见才来回折腾了好几轮
+ok('页面印出数据文件的实际位置与判定', strpos($viewSrc, 'function storeWhere') !== false);
+foreach (['meat.php', 'stock.php'] as $pg) {
+    ok("{$pg} 印出了数据文件位置",
+       strpos((string) file_get_contents($ROOT . '/' . $pg), 'storeWhere()') !== false);
+}
 
 // ---- 静态文件必须带缓存版本号 ----
 // 少了它，用户浏览器会一直用缓存里的旧 app.css：新控件完全没样式，页面看着就是坏的，
@@ -1145,7 +1313,10 @@ Store::useMemoryForTests();
 $sIn('2026-09-06', '23:30', 'salmon_fillet', 'count', '5');
 $pg = Stock::countProgress('2026-09-06 23:30');
 eq('这一轮盘了 1 项', count($pg['done']), 1);
-eq('还差的项数 = 清单总数 − 已盘', count($pg['missing']), count(Stock::items()) - 1);
+// 只数「要盘的」品类 —— 走存入即用量的那些本来就不参与盘点
+$needCount = count(array_filter(Stock::items(),
+    static fn($m) => $m['mode'] === Stock::MODE_COUNT));
+eq('还差的项数 = 要盘的品类数 − 已盘', count($pg['missing']), $needCount - 1);
 eq('没有盘点的时刻返回 null', Stock::countProgress('2026-09-06 09:00'), null);
 
 // ---- 品类清单与单位 ----
@@ -1154,6 +1325,60 @@ eq('每个品类各自固定一个单位', Stock::itemUnit('salmon_fillet'), '�
 eq('时点有显示名', Stock::momentLabel('lunch_end'), '午市后');
 eq('未知时点不炸', Stock::momentLabel('不存在'), '');
 eq('未知品类退回代码本身', Stock::itemLabel('不存在'), '不存在');
+
+// ---- 混合口径：数不清的品类走「存入即用量」 ----
+// Atún 切成大小不一的小块，盘不出「还剩几块」。硬盘只会盘出假数字，
+// 所以这类品类只记存入、进多少算用多少。
+$mixItems = [
+    'boxed' => ['name' => '盒装货', 'unit' => '盒'],                        // 不写 mode = 盘点法
+    'atun'  => ['name' => 'Atún',   'unit' => 'kg', 'mode' => 'direct'],
+    'weird' => ['name' => '写错的', 'unit' => '包', 'mode' => '乱写的'],
+];
+Db::forTests(['stock_items' => $mixItems]);
+eq('不写 mode 默认走盘点法', Stock::itemMode('boxed'), Stock::MODE_COUNT);
+eq('direct 认得出来', Stock::itemMode('atun'), Stock::MODE_DIRECT);
+// 认不出的写法要退回【更严的】那一种。反过来的话，本该盘点的品类会悄悄不盘，
+// 而且毫无迹象，等发现时已经缺了几个月的盘点数据
+eq('mode 写错时退回盘点法', Stock::itemMode('weird'), Stock::MODE_COUNT);
+ok('isDirect 只对 direct 为真',
+   Stock::isDirect('atun') && !Stock::isDirect('boxed') && !Stock::isDirect('weird'));
+eq('未知品类按盘点法', Stock::itemMode('不存在'), Stock::MODE_COUNT);
+
+$dBase = ['happened_date' => $dAgo(1), 'happened_time' => '11:00', 'qty' => '3'];
+[, $e] = Stock::validate($dBase + ['item' => 'atun', 'move_kind' => 'count']);
+ok('存入即用量的品类不许盘点', isset($e['item']));
+ok('拒绝时说清了该改选什么', strpos($e['item'] ?? '', '存入') !== false);
+[, $e] = Stock::validate($dBase + ['item' => 'atun', 'move_kind' => 'in']);
+eq('这类品类照常可以存入', $e, []);
+[, $e] = Stock::validate($dBase + ['item' => 'boxed', 'move_kind' => 'count']);
+eq('盘点法的品类照常可以盘点', $e, []);
+
+// ---- 存入即用量：用量就是存入量 ----
+Store::useMemoryForTests();
+$sIn(date('Y-m-d', strtotime('-40 day')), '11:00', 'atun', 'in', '5');   // 30 天外
+$sIn(date('Y-m-d', strtotime('-10 day')), '11:00', 'atun', 'in', '4');   // 30 天内、7 天外
+$sIn(date('Y-m-d', strtotime('-2 day')),  '11:00', 'atun', 'in', '2');
+$sIn(date('Y-m-d'),                       '11:00', 'atun', 'in', '1');
+$ca = Stock::current()['atun'];
+ok('标成 direct', $ca['direct']);
+eq('近 7 天用量 = 2 + 1', $ca['in_7'], 3.0);
+eq('近 30 天用量 = 4 + 2 + 1', $ca['in_30'], 7.0);
+eq('累计用量 = 全部存入', $ca['in_total'], 12.0);
+eq('记下最近一次存入的时间', substr((string) $ca['last_in_at'], 0, 10), date('Y-m-d'));
+// 这类品类没有「剩多少」这回事，别给出一个会被当成库存的数字
+eq('没有账面结存', $ca['book'], null);
+eq('没有分段用量', count($ca['periods']), 0);
+ok('不标成「从没盘过」的异常', !$ca['counted']);
+
+// ---- 盘点进度不该老提示「还差 Atún」 ----
+Store::useMemoryForTests();
+$sIn($dAgo(1), '23:30', 'boxed', 'count', '5');
+$sIn($dAgo(1), '23:30', 'weird', 'count', '2');   // mode 写错的那个也算盘点法
+$pg = Stock::countProgress($dAgo(1) . ' 23:30');
+eq('盘完盘点法的品类就算齐了', $pg['missing'], []);
+ok('不把不盘点的品类算进「还差」', !in_array('atun', $pg['missing'], true));
+Db::forTests(null);
+Store::useMemoryForTests();
 
 // ---- 页面与铁律 ----
 $stkSrc = (string) file_get_contents(__DIR__ . '/../stock.php');

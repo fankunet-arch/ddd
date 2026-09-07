@@ -50,7 +50,27 @@ final class Stock
     }
 
     /**
-     * 库存品类清单：代码 => ['name' => 显示名, 'unit' => 单位]
+     * 两种口径。每个品类各自选一种 —— 不是所有东西都数得清。
+     *
+     *   MODE_COUNT   盘点法。存入 + 盘点，用量 = 上次盘点 + 期间存入 − 本次盘点。
+     *                最准，前提是这个品类【数得清】（论箱、论条、论包）。
+     *
+     *   MODE_DIRECT  存入即用量。只记存入，不盘点，进多少就算用掉多少。
+     *                给那些【数不清】的品类用：Atún 要切成大小不一的小块，
+     *                切完根本没法数「还剩几块」，硬要盘只会盘出一堆假数字。
+     *                代价是看不出剩多少、也看不出浪费 —— 但总比记一笔糊涂账强。
+     */
+    public const MODE_COUNT  = 'count';
+    public const MODE_DIRECT = 'direct';
+
+    public static function modeLabel(?string $m): string
+    {
+        return [self::MODE_COUNT => '盘点法', self::MODE_DIRECT => '存入即用量'][(string) $m]
+               ?? '盘点法';
+    }
+
+    /**
+     * 库存品类清单：代码 => ['name' => 显示名, 'unit' => 单位, 'mode' => 口径]
      *
      * 单位每个品类各自固定，录入时不用选 —— 同一个品类这次填箱、下次填盒的话，
      * 前后两次盘点就减不出来了。单位只用于显示，不做任何换算。
@@ -63,10 +83,18 @@ final class Stock
             if ($code === '') {
                 continue;
             }
-            // 允许简写成 '代码' => '名称'（那就没有单位）
+            // 允许简写成 '代码' => '名称'（那就没有单位，口径按默认的盘点法）
             $name = is_array($v) ? trim((string) ($v['name'] ?? '')) : trim((string) $v);
             $unit = is_array($v) ? trim((string) ($v['unit'] ?? '')) : '';
-            $out[$code] = ['name' => $name !== '' ? $name : $code, 'unit' => $unit];
+            $mode = is_array($v) ? trim((string) ($v['mode'] ?? '')) : '';
+            // 认不出来的写法一律退回盘点法 —— 那是更严的那一种。
+            // 反过来（默认成「存入即用量」）会让本该盘点的品类悄悄不盘，
+            // 而且没有任何迹象，等发现时已经缺了几个月的盘点数据。
+            $out[$code] = [
+                'name' => $name !== '' ? $name : $code,
+                'unit' => $unit,
+                'mode' => $mode === self::MODE_DIRECT ? self::MODE_DIRECT : self::MODE_COUNT,
+            ];
         }
         return $out;
     }
@@ -79,6 +107,17 @@ final class Stock
     public static function itemUnit(string $code): string
     {
         return self::items()[$code]['unit'] ?? '';
+    }
+
+    public static function itemMode(string $code): string
+    {
+        return self::items()[$code]['mode'] ?? self::MODE_COUNT;
+    }
+
+    /** 这个品类是不是「存入即用量」（不参与盘点） */
+    public static function isDirect(string $code): bool
+    {
+        return self::itemMode($code) === self::MODE_DIRECT;
     }
 
     /** 盘点时点：代码 => ['name' => 显示名, 'time' => 'HH:MM'] */
@@ -165,6 +204,13 @@ final class Stock
             $e['item'] = '这个品类不在清单里';
         } else {
             $c['item'] = $item;
+            // 「存入即用量」的品类不参与盘点 —— 它本来就是因为数不清才走这个口径的，
+            // 记一笔盘点数进去只会让后面的用量算出个假数字
+            if ($kind === self::COUNT && self::isDirect($item)) {
+                $e['item'] = '「' . self::itemLabel($item) . '」是「存入即用量」的品类，'
+                           . '不参与盘点 —— 请改选「存入」';
+                unset($c['item']);
+            }
         }
 
         // ---- 数量：必填 ----
@@ -426,11 +472,33 @@ final class Stock
                 }
             }
 
+            // 「存入即用量」的品类：存入本身就是用量，按最近 7 天 / 30 天汇总。
+            // 这两个数只对这类品类有意义，盘点法的品类看分段用量。
+            $in7  = 0.0;
+            $in30 = 0.0;
+            $lastIn = null;
+            $d7  = date('Y-m-d', strtotime('-6 day'));    // 含今天共 7 天
+            $d30 = date('Y-m-d', strtotime('-29 day'));
+            foreach ($rows as $r) {
+                if ((string) $r['move_kind'] !== self::IN) {
+                    continue;
+                }
+                $lastIn = $r;
+                $d = substr((string) $r['happened_at'], 0, 10);
+                if ($d >= $d7)  { $in7  += (float) $r['qty']; }
+                if ($d >= $d30) { $in30 += (float) $r['qty']; }
+            }
+
             $last = $periods ? $periods[count($periods) - 1] : null;
             $out[$code] = [
                 'name'       => $meta['name'],
                 'unit'       => $meta['unit'],
+                'mode'       => $meta['mode'],
+                'direct'     => $meta['mode'] === self::MODE_DIRECT,
                 'rows'       => count($rows),
+                'in_7'       => $in7,
+                'in_30'      => $in30,
+                'last_in_at' => $lastIn !== null ? (string) $lastIn['happened_at'] : null,
                 'counted'    => $lastCount !== null,
                 'last_at'    => $lastCount !== null ? (string) $lastCount['happened_at'] : null,
                 'last_moment'=> $lastCount !== null ? ($lastCount['moment'] ?? null) : null,
@@ -456,6 +524,9 @@ final class Stock
      * 漏掉的那项下次盘点时会把两段的用量合成一段，看着就是「某段暴增」。
      * 所以录完一条就把同一时刻的进度显示出来。
      *
+     * 「存入即用量」的品类不算在「还差」里 —— 它们本来就不盘，
+     * 每次都提示「还差 Atún」等于把这个提醒变成噪音，几天之后就没人看了。
+     *
      * @return array ['at'=>时刻, 'done'=>[代码…], 'missing'=>[代码…]]|null
      */
     public static function countProgress(string $happenedAt): ?array
@@ -468,8 +539,10 @@ final class Stock
         if (!$rows) {
             return null;
         }
-        $done    = array_column($rows, 'item');
-        $missing = array_values(array_diff(array_keys(self::items()), $done));
+        $done      = array_column($rows, 'item');
+        $needCount = array_keys(array_filter(self::items(),
+            static fn($m) => $m['mode'] === self::MODE_COUNT));
+        $missing   = array_values(array_diff($needCount, $done));
         return ['at' => $happenedAt, 'done' => $done, 'missing' => $missing];
     }
 }
