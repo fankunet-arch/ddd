@@ -250,6 +250,29 @@ foreach ([$tmpRoot . '/sub/data', $tmpRoot . '/sub', $tmpRoot . '/data', $tmpRoo
     @rmdir($d);
 }
 
+// ---- 网站根的第二个来源：SCRIPT_FILENAME 减去 SCRIPT_NAME ----
+// nginx + PHP-FPM 某些配置下 DOCUMENT_ROOT 是空的。只认它的话，
+// 「在不在网站里」永远判不出来，于是什么位置都被当成安全的 —— 静默放行。
+$wr = sys_get_temp_dir() . '/selftest_wr_' . getmypid();
+@mkdir($wr . '/wwwroot/app', 0777, true);
+file_put_contents($wr . '/wwwroot/app/stock.php', '<?php');
+eq('从脚本路径反推出网站根',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', '/app/stock.php'),
+   realpath($wr . '/wwwroot'));
+eq('程序就在网站根时也推得对',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', '/stock.php'),
+   realpath($wr . '/wwwroot/app'));
+// 推不出来就说不知道，别硬凑一个 —— 凑错了比不知道更糟
+eq('对不上时返回 null',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', '/别的/路径.php'), null);
+eq('相对的 SCRIPT_NAME 不硬猜',
+   Store::deriveWebRoot($wr . '/wwwroot/app/stock.php', 'app/stock.php'), null);
+eq('文件不存在时返回 null',
+   Store::deriveWebRoot($wr . '/没有这个文件.php', '/x.php'), null);
+eq('参数为空时返回 null', Store::deriveWebRoot('', ''), null);
+@unlink($wr . '/wwwroot/app/stock.php');
+foreach ([$wr . '/wwwroot/app', $wr . '/wwwroot', $wr] as $d) { @rmdir($d); }
+
 // ---- 自动选址：面板类主机的目录形状（程序在网站根【下面一层】）----
 // 这正是线上踩到的那种：老默认「程序目录上一级」算出来还在网站根里。
 $panel = sys_get_temp_dir() . '/selftest_panel_' . getmypid();
@@ -359,8 +382,16 @@ foreach (['meat.php', 'meatweek.php', 'stock.php', 'stocknow.php'] as $pg) {
 ok('警告里写清了怎么改',
    strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'store_path') !== false);
 // WAL 模式下还有两个附属文件，只搬走主文件会丢最近的写入
+$viewSrc = (string) file_get_contents($ROOT . '/lib/view.php');
 ok('警告里提醒了 -wal / -shm 也要一起搬',
-   strpos((string) file_get_contents($ROOT . '/lib/view.php'), 'app.db-wal') !== false);
+   strpos($viewSrc, '-wal') !== false && strpos($viewSrc, '-shm') !== false);
+// 页面上要印出【实际用的路径】和安全判定 —— 光说「我挑了个安全位置」不够，
+// 得让人一眼能核，这次就是因为看不见才来回折腾了好几轮
+ok('页面印出数据文件的实际位置与判定', strpos($viewSrc, 'function storeWhere') !== false);
+foreach (['meat.php', 'stock.php'] as $pg) {
+    ok("{$pg} 印出了数据文件位置",
+       strpos((string) file_get_contents($ROOT . '/' . $pg), 'storeWhere()') !== false);
+}
 
 // ---- 静态文件必须带缓存版本号 ----
 // 少了它，用户浏览器会一直用缓存里的旧 app.css：新控件完全没样式，页面看着就是坏的，

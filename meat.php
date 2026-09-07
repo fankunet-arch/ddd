@@ -424,7 +424,7 @@ pageHeader('肉类采购', 'meat');
 </details>
 
 <p class="note">
-  这些记录存在<strong>独立的 SQLite 文件</strong>里（<code><?= h(Store::path()) ?></code>），
+  这些记录存在<strong>独立的 SQLite 文件</strong>里（<?= storeWhere() ?>），
   与 POS 主库完全无关 —— 本程序对主库始终只读。
   「作废」是软删除，数据还在库里，可以恢复；每次新增、修改、作废都有留痕。
 </p>

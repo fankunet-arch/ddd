@@ -18,15 +18,28 @@
  *  不许写出把两边放进同一条 SQL 的代码。
  *
  * ============================================================
- *  数据文件放哪
+ *  数据文件放哪 —— 程序自己挑，不用固定默认值
  * ============================================================
- *  默认放在【程序目录的上一级】的 data/ 里，也就是网站根目录之外：
+ *  绝对不能放进网站可访问目录：`.db` 就是个普通文件，别人猜对网址就能
+ *  整个下载走，不需要登录，日志里也只是一次普通的静态文件请求。
  *
- *      /var/www/ddd/          ← 程序在这里
- *      /var/www/data/app.db   ← 数据文件在这里
+ *  【为什么不能只写一个固定默认值】老版本默认「程序目录的上一级 / data」，
+ *  假设那里在网站外面。多数虚机是这样，但面板类主机（宝塔/aaPanel）不是：
  *
- *  绝对不能放进网站目录 —— 那样别人直接输 URL 就能把整个数据库下载走。
- *  路径可在 config.php 的 store_path 里改。
+ *      /www/wwwroot/站点/www/wwwroot/       ← 网站根（能访问）
+ *      /www/wwwroot/站点/www/wwwroot/app/   ← 程序放这里
+ *      /www/wwwroot/站点/www/wwwroot/data/  ← 「上一级」正好还在网站里 ❌
+ *      /www/wwwroot/站点/www/               ← 这层才在外面 ✅
+ *
+ *  【为什么只报警不够】第一版只在页面上红字提示，结果没人去改配置，
+ *  程序每次还是往同一个地方建库 —— 删一次，长一次。所以现在是
+ *  【先挑位置再建】：path() 按顺序试
+ *      1. 网站根的上一级 / salesreport-data
+ *      2. 程序目录的上一级 / salesreport-data
+ *  选第一个「不在网站里 + 可写」的；都不行才退回程序目录旁边，
+ *  同时写访问保护文件并在页面上要求人来指定 store_path。
+ *
+ *  config.php 里写了 store_path 就照办，不自作主张。
  *
  *  这一项让程序第一次需要【写权限】：那个目录要让 Web 服务器账号可写。
  */
@@ -86,9 +99,19 @@ final class Store
             return self::$resolved = $cfg;       // 明确配置了就照办，不自作主张
         }
 
+        $blind = self::webRootUnknown();
         foreach (self::candidateDirs() as $dir) {
             if (self::insideDocRoot($dir) !== null || !self::dirUsable($dir)) {
                 continue;
+            }
+            if ($blind) {
+                // 判不出网站根（SERVER 变量都缺）时【不能假定安全】。
+                // 位置照选，但要说出来，并且照样写访问保护文件 —— 静默放行
+                // 正是上一版的毛病：查不出来就当没事，结果一直建在能下载的地方。
+                self::$notes[] = ['warn', '判断不出网站根目录（服务器没给 DOCUMENT_ROOT，'
+                    . 'SCRIPT_FILENAME 也推不出来），没法确认 ' . $dir
+                    . ' 是不是网站访问得到。请在浏览器里试一下这个文件的网址，'
+                    . '能下载就在 config.php 里指定 store_path。'];
             }
             return self::$resolved = $dir . DIRECTORY_SEPARATOR . self::FILE_NAME;
         }
@@ -112,9 +135,8 @@ final class Store
     private static function candidateDirs(): array
     {
         $out = [];
-        $doc = (string) ($_SERVER['DOCUMENT_ROOT'] ?? '');
-        $doc = $doc !== '' ? realpath($doc) : false;
-        if ($doc !== false) {
+        $doc = self::webRoot();
+        if ($doc !== null) {
             $out[] = dirname($doc) . DIRECTORY_SEPARATOR . self::DIR_NAME;
         }
         $app   = self::appRoot();
@@ -169,16 +191,90 @@ final class Store
         return self::insideDocRoot(dirname(self::path()));
     }
 
+    /**
+     * 网站根目录在哪。
+     *
+     * 两个来源都用上，取【最浅的那个】：
+     *
+     *   1. $_SERVER['DOCUMENT_ROOT'] —— 常见，但 nginx + PHP-FPM 某些配置下是空的
+     *   2. SCRIPT_FILENAME 去掉 SCRIPT_NAME —— 这个几乎总有：
+     *      /站点/www/wwwroot/app/stock.php  减去  /app/stock.php
+     *      = /站点/www/wwwroot
+     *
+     * 为什么取最浅的：两个对不上时，浅的那个把【更多】目录判成「在网站里」，
+     * 也就是更保守。宁可多报一次「这里不安全」，也不能漏掉一次真不安全的。
+     */
+    private static function webRoot(): ?string
+    {
+        $cands = [];
+        $doc = (string) ($_SERVER['DOCUMENT_ROOT'] ?? '');
+        if ($doc !== '' && ($r = realpath($doc)) !== false) {
+            $cands[] = $r;
+        }
+        // 命令行下 SCRIPT_FILENAME 指的是被执行的脚本本身，跟网站根毫无关系，
+        // 拿它推出来的东西会把测试和体检脚本全带偏 —— 只在网页请求里用
+        if (PHP_SAPI !== 'cli') {
+            $d = self::deriveWebRoot((string) ($_SERVER['SCRIPT_FILENAME'] ?? ''),
+                                     (string) ($_SERVER['SCRIPT_NAME'] ?? ''));
+            if ($d !== null) {
+                $cands[] = $d;
+            }
+        }
+        if (!$cands) {
+            return null;
+        }
+        // 两个来源对不上时取【最浅的】：浅的把更多目录判成「在网站里」，更保守。
+        // 宁可多报一次「这里不安全」，也不能漏掉一次真不安全的。
+        usort($cands, static fn($a, $b) => strlen($a) <=> strlen($b));
+        return $cands[0];
+    }
+
+    /**
+     * SCRIPT_FILENAME 去掉 SCRIPT_NAME = 网站根。纯函数，好单独测。
+     *
+     *   /站点/www/wwwroot/app/stock.php  减去  /app/stock.php
+     *   = /站点/www/wwwroot
+     *
+     * DOCUMENT_ROOT 在 nginx + PHP-FPM 的某些配置下是空的，这条是备胎。
+     */
+    public static function deriveWebRoot(string $scriptFile, string $scriptName): ?string
+    {
+        if ($scriptFile === '' || $scriptName === '') {
+            return null;
+        }
+        $rf = realpath($scriptFile);
+        if ($rf === false) {
+            return null;
+        }
+        $rfN = str_replace('\\', '/', $rf);
+        $snN = str_replace('\\', '/', $scriptName);
+        if ($snN[0] !== '/') {
+            return null;                       // 相对路径推不出根，别乱猜
+        }
+        $len = strlen($snN);
+        if (substr($rfN, -$len) !== $snN) {
+            return null;                       // 对不上就说不知道，不硬凑
+        }
+        $base = substr($rfN, 0, -$len);
+        if ($base === '') {
+            return null;
+        }
+        $rb = realpath($base);
+        return $rb === false ? null : $rb;
+    }
+
+    /** 判不出网站根（命令行、或者 SERVER 变量都缺）—— 这时不能假定安全 */
+    public static function webRootUnknown(): bool
+    {
+        return self::webRoot() === null;
+    }
+
     /** 这个目录是不是在网站根里面？是的话返回网站根，否则 null */
     private static function insideDocRoot(string $dir): ?string
     {
-        $doc = (string) ($_SERVER['DOCUMENT_ROOT'] ?? '');
-        if ($doc === '') {
+        $doc = self::webRoot();
+        if ($doc === null) {
             return null;                       // 命令行等场景判断不了，不误报
-        }
-        $doc = realpath($doc);
-        if ($doc === false) {
-            return null;
         }
         $real = realpath($dir);
         if ($real !== false) {
@@ -240,9 +336,8 @@ final class Store
     private static function adoptLegacy(string $target): void
     {
         $dirs = [];
-        $doc  = (string) ($_SERVER['DOCUMENT_ROOT'] ?? '');
-        $doc  = $doc !== '' ? realpath($doc) : false;
-        if ($doc !== false) {
+        $doc  = self::webRoot();
+        if ($doc !== null) {
             $dirs[] = dirname($doc);
         }
         $dirs[] = dirname(self::appRoot());
