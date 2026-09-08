@@ -76,7 +76,11 @@ h4{font-size:13px;margin:0 0 8px;color:var(--dim)}
    一个 .cap，它们就在同一行里了。 */
 .panel label > .cap{display:block}
 .panel label.grow{flex:1;min-width:260px}
-.panel input[type=date],.panel input[type=time],.panel input[type=text],.panel select{
+/* 新加类型时【上下两处都要加】：这里是宽屏，文件末尾 640px 断点里还有一份。
+   只改一处的话，手机上那个控件就是 24px 高、12px 字（iOS 会自动放大页面），
+   而宽屏上一切正常 —— 这个坑 input[type=time] 已经踩过一次了。 */
+.panel input[type=date],.panel input[type=time],.panel input[type=text],
+.panel input[type=file],.panel select{
   border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;
   /* 16px 以下 iOS 会在聚焦时自动放大页面，所以不要更小 */
   font-size:16px;background:#fff;color:var(--text);min-width:150px;
@@ -420,7 +424,8 @@ tr.acked td .state,tr.acked td .btn-mini{opacity:1}
   .panel .row{flex-direction:column;align-items:stretch;gap:12px}
   .panel label{width:100%}
   .panel label.grow{min-width:0}
-  .panel input[type=date],.panel input[type=time],.panel input[type=text],.panel select{
+  .panel input[type=date],.panel input[type=time],.panel input[type=text],
+  .panel input[type=file],.panel select{
     width:100%;min-width:0}
   /* 手机上一行一个字段，宽度类一律让位 */
   .panel .row.fields{display:flex}

@@ -3,7 +3,7 @@
 set -e
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 T=$(mktemp -d)
-cp -r "$APP"/{index.php,dish.php,station.php,open.php,compare.php,meat.php,meatweek.php,stock.php,stocknow.php,login.php,config.php,lib,assets} "$T"/
+cp -r "$APP"/{index.php,dish.php,station.php,open.php,compare.php,meat.php,meatweek.php,meatimport.php,stock.php,stocknow.php,login.php,config.php,lib,assets} "$T"/
 # 自有 SQLite 放进临时目录，别落到别处
 mkdir -p "$T/store"
 python3 -c "
@@ -137,6 +137,40 @@ final class Auth {
 }
 PHP
 
+# 发票导入的【核对页】要有数据才显示得出来，而它那张逐条核对表是这一页最宽的
+# 东西 —— 不把这个状态渲染出来，表格对齐和自适应两道检查就等于没覆盖到它。
+# 这里直接把解析结果塞进 $_SESSION（登录已被桩掉，session 就是个普通数组）。
+# 日期用固定的过去日期：将来也还是过去，不会被「日期在未来」的校验拦下。
+cat > "$T/imp.csv" <<'CSV'
+类别;送货日期;净重;未税金额;税率;发票号;中文名称;类型
+Salmón;2026-03-10;10,5;100;10;FA-1;三文鱼整条;Compra
+Atún;2026-03-11;5;60;10;FA-2;金枪鱼;Compra
+Ternera;2026-03-12;20;180;10;FA-3;牛肉大块，备注写长一点看看会不会撑破表格;Compra
+Salmón;2026-03-13;-4;-46;10;FA-4;退货;Return
+Pulpo;2026-03-14;6;70;10;FA-5;章鱼（清单里没有这个品类）;Compra
+CSV
+
+run_preview() { # $1=用例名
+  out=$(cd "$T" && REQUEST_METHOD=GET STUB_OUT=0 \
+        php -d error_reporting=E_ALL -d display_errors=1 -r "
+          \$_GET = [];
+          require 'lib/meatimport.php';
+          \$_SESSION = ['meatimport' =>
+              MeatImport::parseAll('imp.csv', 'imp.csv') + ['at' => date('Y-m-d H:i')]];
+          include 'meatimport.php';" 2>&1)
+  if echo "$out" | grep -qiE '(Fatal error|Parse error|Warning:|Deprecated:|Notice:|Uncaught)'; then
+    echo "  ✗ $1"; echo "$out" | grep -iE '(Fatal|Parse|Warning|Deprecated|Notice|Uncaught)' | head -3 | sed 's/^/      /'
+    return 1
+  fi
+  if ! echo "$out" | grep -q '</html>'; then echo "  ✗ $1 —— 页面未渲染完整"; return 1; fi
+  for want in '认出来的列' '逐条核对' '退货／负数行' '认不出品类' '确认无误，导入'; do
+    if ! echo "$out" | grep -q "$want"; then echo "  ✗ $1 —— 少了「$want」"; return 1; fi
+  done
+  echo "  ✓ $1  ($(echo "$out" | wc -c) 字节)"
+  echo "$out" > "$T/out_$1.html"
+  return 0
+}
+
 run() { # $1=页面 $2=query string $3=用例名
   out=$(cd "$T" && QUERY_STRING="$2" REQUEST_METHOD=GET STUB_OUT="${STUB_OUT:-0}" \
         php -d error_reporting=E_ALL -d display_errors=1 \
@@ -197,6 +231,9 @@ run meatweek.php ""                                                     "采购-
 run meatweek.php "weeks=4"                                              "采购-周报表4周"  || fails=$((fails+1))
 run meatweek.php "weeks=12"                                             "采购-周报表12周" || fails=$((fails+1))
 run meatweek.php "weeks=%3Cscript%3E"                                   "采购-周报表非法" || fails=$((fails+1))
+run meatimport.php ""                                                   "采购-发票导入"   || fails=$((fails+1))
+run meatimport.php "sheet=%3Cscript%3E"                                  "采购-导入非法参数" || fails=$((fails+1))
+run_preview "采购-导入核对页"                                             || fails=$((fails+1))
 run stock.php ""                                                        "库存-录入页"     || fails=$((fails+1))
 run stock.php "mk=count&deleted=1"                                      "库存-只看盘点"   || fails=$((fails+1))
 run stock.php "item=%3Cscript%3E&edit=abc&at=xx"                        "库存-非法参数"   || fails=$((fails+1))

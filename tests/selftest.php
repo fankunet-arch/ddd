@@ -1177,6 +1177,314 @@ ok('页面写明统计的是采购量不是消耗量',
    strpos($mwSrc, '不是「实际消耗量」') !== false);
 
 // =====================================================================
+echo "\n【2e2a3】发票导入（xlsx / csv → 采购表）\n";
+// =====================================================================
+
+require_once __DIR__ . '/../lib/meatimport.php';
+Store::useMemoryForTests();
+
+/** 拿 CSV 当测试样本：内容一眼能看懂，改起来也不用生成 zip */
+$csv = static function (array $lines): string {
+    $f = tempnam(sys_get_temp_dir(), 'imp') . '.csv';
+    file_put_contents($f, implode("\n", $lines));
+    return $f;
+};
+
+// ---- 按表头文字认列，不是按第几列 ----
+// 两份真实文件的列顺序就不一样。写死列号的话，换一份文件全部错位，
+// 而且错位是【静默】的：数字照样进库，只是全填进了错的字段。
+$f1 = $csv([
+    '类别;送货日期;净重;未税金额;税率;发票号;中文名称;类型',
+    'Salmón;2026-03-10;10;100;10;A-1;三文鱼整条;Compra',
+    'Atún;2026-03-11;5;60;10;A-2;金枪鱼;Compra',
+]);
+$p1 = MeatImport::parse($f1, 'x.csv');
+eq('日期认到了第 2 列', $p1['map']['date'], 'B');
+eq('重量认到了第 3 列', $p1['map']['weight'], 'C');
+eq('品类认到了第 1 列', $p1['map']['kind'], 'A');
+eq('未税金额 + 税率 → 折算口径', $p1['basis'], 'computed');
+eq('两条都能导', $p1['summary']['ok'], 2);
+// 100 × 1.10 + 60 × 1.10 = 176：存的是【含税】，与 POS 实收同口径
+eq('金额折算成含税', round($p1['summary']['money'], 2), 176.0);
+eq('重量合计', round($p1['summary']['kg'], 3), 15.0);
+eq('均价 = 含税金额 ÷ 公斤', round($p1['summary']['per_kg'], 4), round(176 / 15, 4));
+ok('没有误报', $p1['summary']['warn'] === []);
+
+// ---- 「单价」不能被当成「金额」----
+// 这个坑在真实文件上踩过：「含税单价」被认成「含税金额」，
+// 合计从两万变成七百八 —— 行数、日期全对，只有金额悄悄换了一列。
+$f2 = $csv([
+    '类别;送货日期;净重;含税单价;含税金额;类型',
+    'Salmón;2026-03-10;10;11,50;115;Compra',
+]);
+$p2 = MeatImport::parse($f2, 'x.csv');
+eq('含税金额认的是「金额」列不是「单价」列', $p2['map']['money_inc'], 'E');
+eq('金额是行合计', round($p2['summary']['money'], 2), 115.0);
+
+// ---- 照着真实文件的表头形状认列 ----
+// 这一段用的是发票文件里【原样】的双语表头。它里面全是陷阱：
+//   「Invoice date / 发票日期」里有 invoice —— 认成发票号就把日期写进备注
+//   「Unit price ex VAT / 未税单价」里有 VAT   —— 认成税率就会拿单价当税率去折算
+//   「含税单价」和「含税金额」只差一个字     —— 认错了金额直接差一个数量级
+// 这些都不会报错，只会静默地把另一列的数存进来。排除词就是拦这个的。
+$real = $csv([
+    'Delivery date / 送货日期;Invoice date / 发票日期;Supplier / 供货商;'
+    . 'Invoice / 发票号;Type / 类型;Category / 类别;Weight / 重量(kg);'
+    . 'Unit price ex VAT / 未税单价;VAT / 税率;Unit price incl VAT / 含税单价;'
+    . 'Line amount ex VAT / 未税金额;Line amount incl VAT / 含税金额',
+    '2026-03-10;2026-03-12;Pescados Gaizka;M/960;Purchase;金枪鱼 / Atún;'
+    . '15,89;14,85;0,1;16,335;235,97;259,57',
+]);
+$pr = MeatImport::parse($real, 'x.csv');
+eq('送货日期认到 A 列（不是发票日期）',   $pr['map']['date'],      'A');
+eq('发票号认的是发票号，不是发票日期',    $pr['map']['invoice'],   'D');
+eq('类别认到 F 列',                       $pr['map']['kind'],      'F');
+eq('重量认到 G 列',                       $pr['map']['weight'],    'G');
+eq('税率认的是税率，不是「未税单价」',    $pr['map']['vat'],       'I');
+eq('含税金额认的是金额，不是含税单价',    $pr['map']['money_inc'], 'L');
+eq('未税金额认到 K 列',                   $pr['map']['money'],     'K');
+eq('供货商认到 C 列',                     $pr['map']['supplier'],  'C');
+eq('文件给了含税金额就直接用',            $pr['basis'],            'incl');
+// 259.57 是这一行的含税合计；认成含税单价（16.335）就会差一个数量级
+eq('金额取的是行合计', round((float) $pr['rows'][0]['clean']['total_price'], 2), 259.57);
+eq('重量取的是 kg', round((float) $pr['rows'][0]['clean']['weight_kg'], 2), 15.89);
+ok('备注里写的是发票号，不是日期',
+   strpos((string) $pr['rows'][0]['clean']['note'], 'M/960') !== false);
+
+// ---- 均价离谱 = 认错列的报警器 ----
+// 这是唯一能【自动】发现认错列的信号：行数和日期看不出问题，
+// 但把单价当金额算出来的均价会离谱到一眼可见。
+$f4 = $csv([
+    '类别;送货日期;净重;含税金额',
+    'Salmón;2026-03-10;100;5',        // 0.05 €/kg
+]);
+$p4 = MeatImport::parse($f4, 'x.csv');
+ok('均价太低会报警', $p4['summary']['warn'] !== []);
+ok('报警说清了怀疑认错列',
+   strpos(implode(' ', $p4['summary']['warn']), '认错了列') !== false);
+$f5 = $csv([
+    '类别;送货日期;净重;含税金额',
+    'Salmón;2026-03-10;1;5000',       // 5000 €/kg
+]);
+ok('均价太高也会报警', MeatImport::parse($f5, 'x.csv')['summary']['warn'] !== []);
+$sane = MeatImport::sanePerKg();
+ok('合理区间是个真区间', $sane[0] > 0 && $sane[1] > $sane[0]);
+
+// ---- 退货行：跳过并列出来，绝不做抵扣 ----
+// 悄悄扣掉会让合计和发票对不上，而对不上的时候没人知道是哪里扣的。
+$f6 = $csv([
+    '类别;送货日期;净重;含税金额;类型',
+    'Salmón;2026-03-10;10;115;Compra',
+    'Salmón;2026-03-15;-4;-46;Return',
+]);
+$p6 = MeatImport::parse($f6, 'x.csv');
+eq('退货行不算进可导入', $p6['summary']['ok'], 1);
+eq('退货行被跳过', $p6['summary']['skip'], 1);
+ok('跳过的原因写给人看', strpos((string) $p6['rows'][1]['skip'], '退货') !== false);
+eq('金额没有被退货抵掉', round($p6['summary']['money'], 2), 115.0);
+
+// 只有负数、没写 Return 的行也要拦住（数据库 CHECK 也不收负数）。
+// 光看「跳过了几条」不够 —— 通用校验（重量要大于 0）顺手也会挡下它，
+// 于是把「认出这是退货」这条检查演成一个永远通过的空检查。要看【原因】。
+$f7 = $csv(['类别;送货日期;净重;含税金额', 'Salmón;2026-03-10;-4;-46']);
+$p7 = MeatImport::parse($f7, 'x.csv');
+eq('光是负数也跳过', $p7['summary']['ok'], 0);
+ok('而且认出这是退货／负数行，不是笼统的「校验没过」',
+   strpos((string) $p7['rows'][0]['skip'], '退货／负数') !== false,
+   '实际原因：' . (string) $p7['rows'][0]['skip']);
+// 金额为负、重量正常的行同样要被认成退货
+$f7b = $csv(['类别;送货日期;净重;含税金额', 'Salmón;2026-03-10;4;-46']);
+ok('金额为负也认成退货行',
+   strpos((string) MeatImport::parse($f7b, 'x.csv')['rows'][0]['skip'], '退货／负数') !== false);
+
+// ---- 认不出的东西宁可跳过，也不猜 ----
+$f8 = $csv([
+    '类别;送货日期;净重;含税金额',
+    'Pulpo;2026-03-10;10;115',        // 品类清单里没有
+    'Salmón;不是日期;10;115',
+    'Salmón;2026-03-10;;115',         // 没重量
+    'Salmón;2026-03-10;abc;115',
+]);
+$p8 = MeatImport::parse($f8, 'x.csv');
+eq('四条都跳过，一条都不猜', $p8['summary']['ok'], 0);
+eq('跳过四条', $p8['summary']['skip'], 4);
+ok('认不出品类说清楚了', strpos((string) $p8['rows'][0]['skip'], '认不出品类') !== false);
+ok('日期读不出说清楚了', strpos((string) $p8['rows'][1]['skip'], '日期') !== false);
+ok('缺重量说清楚了', strpos((string) $p8['rows'][2]['skip'], '重量') !== false);
+eq('认不出的品类返回 null', MeatImport::kind('Pulpo'), null);
+eq('西语带重音认得出', MeatImport::kind('Atún'), 'atun');
+eq('中文认得出', MeatImport::kind('三文鱼整条'), 'salmon');
+eq('直接写代码也认', MeatImport::kind('beef'), 'beef');
+
+// ---- 认不出表头就直接说，不硬凑 ----
+throws('认不出表头会报错', static function () use ($csv) {
+    MeatImport::parse($csv(['随便;写点;什么', '1;2;3']), 'x.csv');
+});
+
+// ---- 数字：西语的逗号小数和千分位 ----
+$f9 = $csv([
+    '类别;送货日期;净重;含税金额',
+    'Salmón;2026-03-10;12,5;1.234,50',
+]);
+$p9 = MeatImport::parse($f9, 'x.csv');
+eq('逗号当小数点', (float) $p9['rows'][0]['clean']['weight_kg'], 12.5);
+eq('点是千分位', (float) $p9['rows'][0]['clean']['total_price'], 1234.5);
+
+// ---- 文件内部的完全重复行 ----
+$f10 = $csv([
+    '类别;送货日期;净重;含税金额;发票号',
+    'Salmón;2026-03-10;10;115;A-1',
+    'Salmón;2026-03-10;10;115;A-1',
+]);
+$p10 = MeatImport::parse($f10, 'x.csv');
+eq('文件里重复的行只导一条', $p10['summary']['ok'], 1);
+ok('说清了和第几行重复', strpos((string) $p10['rows'][1]['skip'], '重复') !== false);
+// 同一天进两批【不同规格】不算重复 —— 只用「日期+品类」做键就会误杀
+$f11 = $csv([
+    '类别;送货日期;净重;含税金额;发票号',
+    'Salmón;2026-03-10;10;115;A-1',
+    'Salmón;2026-03-10;8;92;A-1',
+]);
+eq('同一天不同批次不算重复', MeatImport::parse($f11, 'x.csv')['summary']['ok'], 2);
+
+// ---- 导入：整批一个事务，重复导入不会翻倍 ----
+Store::useMemoryForTests();
+$items = static function (array $res): array {
+    $out = [];
+    foreach ($res['rows'] as $r) {
+        if ($r['clean'] !== null) { $out[] = ['clean' => $r['clean'], 'key' => $r['key']]; }
+    }
+    return $out;
+};
+$r1 = Meat::createMany($items($p1));
+eq('第一次导入进了两条', $r1['inserted'], 2);
+$r2 = Meat::createMany($items($p1));
+eq('同一批再导一次，一条都不进', $r2['inserted'], 0);
+eq('而且如实报出重复条数', $r2['duplicate'], 2);
+eq('库里还是两条',
+   (int) Store::selectOne('SELECT COUNT(*) c FROM meat_purchase')['c'], 2);
+eq('每条都有留痕', (int) Store::selectOne(
+   "SELECT COUNT(*) c FROM meat_purchase_log WHERE action = 'import'")['c'], 2);
+
+// 手工录入的行 import_key 是 NULL；NULL 之间不算冲突，多少条都行
+Meat::create(Meat::validate(['purchase_date' => '2026-03-01', 'kind' => 'salmon',
+                             'weight_kg' => '3'])[0]);
+Meat::create(Meat::validate(['purchase_date' => '2026-03-02', 'kind' => 'salmon',
+                             'weight_kg' => '4'])[0]);
+eq('手工录入不受唯一索引影响',
+   (int) Store::selectOne('SELECT COUNT(*) c FROM meat_purchase')['c'], 4);
+eq('手工录入的 import_key 为空', (int) Store::selectOne(
+   'SELECT COUNT(*) c FROM meat_purchase WHERE import_key IS NULL')['c'], 2);
+
+// 唯一索引是最后一道防线：绕过 createMany 直接插重复指纹也要被拦住
+throws('数据库层拦得住重复指纹', static function () {
+    $k = Store::selectOne('SELECT import_key FROM meat_purchase
+                           WHERE import_key IS NOT NULL')['import_key'];
+    Store::run("INSERT INTO meat_purchase
+                  (purchase_date, kind, weight_kg, import_key, created_at, updated_at)
+                VALUES ('2026-03-01', 'salmon', 1, :k, 't', 't')", [':k' => $k]);
+});
+
+// 整批一个事务：中间有一条写不进去，前面已经写进去的也不许留下。
+// 第二条要【骗过入口校验、死在数据库那一层】—— 否则异常在事务外面就抛了，
+// 根本没进事务，也就测不到回滚，更测不到「错误有没有被吞掉」。
+// weight_kg = -5 正好：assertClean 只看「重量和件数至少有一个」，放它过；
+// 数据库的 CHECK (weight_kg > 0) 才拦下来。
+Store::useMemoryForTests();
+throws('批里有一条写不进去，异常要抛出来（不能悄悄吞掉）', static function () {
+    Meat::createMany([
+        ['clean' => Meat::validate(['purchase_date' => '2026-03-01', 'kind' => 'salmon',
+                                    'weight_kg' => '3'])[0], 'key' => 'k1'],
+        ['clean' => ['purchase_date' => '2026-03-02', 'kind' => 'salmon',
+                     'weight_kg' => -5, 'unit_count' => null, 'unit_type' => null,
+                     'price_basis' => null, 'unit_price' => null, 'total_price' => null,
+                     'supplier' => null, 'note' => null], 'key' => 'k2'],
+    ]);
+});
+eq('回滚之后一条都没留下（包括前面那条好的）',
+   (int) Store::selectOne('SELECT COUNT(*) c FROM meat_purchase')['c'], 0);
+// 入口校验也还得在：连必填字段都没有的东西，不该等到数据库才发现
+throws('缺必填字段在入口就挡下', static function () {
+    Meat::createMany([['clean' => ['purchase_date' => '', 'kind' => ''], 'key' => 'k3']]);
+});
+
+// ---- 老库要能补上 import_key 这一列 ----
+// CREATE TABLE IF NOT EXISTS 碰到已存在的表什么都不做，
+// 所以升级之后老库不会自己长出新列 —— 少了这段，页面会报 no such column，
+// 而开发机上因为库是新建的，怎么试都是好的。
+$oldDb = tempnam(sys_get_temp_dir(), 'oldschema') . '.db';
+$op = new PDO('sqlite:' . $oldDb, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$op->exec('CREATE TABLE meat_purchase (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, purchase_date TEXT NOT NULL,
+             kind TEXT NOT NULL, weight_kg REAL, unit_count REAL, unit_type TEXT,
+             price_basis TEXT, unit_price REAL, total_price REAL, supplier TEXT,
+             note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+             deleted_at TEXT)');
+$op->exec("INSERT INTO meat_purchase (purchase_date, kind, weight_kg, created_at, updated_at)
+           VALUES ('2026-02-01', 'salmon', 7, 't', 't')");
+$op = null;
+$sRef = new ReflectionClass('Store');
+$sPdo = $sRef->getProperty('pdo');
+$sPdo->setAccessible(true);
+$sPdo->setValue(null, null);
+Db::forTests(['store_path' => $oldDb]);
+Store::resetPathCache();
+ok('老库打得开（认作 legacy）', Store::isReady());
+$cols = array_column(Store::select('PRAGMA table_info(meat_purchase)'), 'name');
+ok('老库补上了 import_key 列', in_array('import_key', $cols, true));
+eq('老数据一条没少',
+   (int) Store::selectOne('SELECT COUNT(*) c FROM meat_purchase')['c'], 1);
+$r3 = Meat::createMany($items($p1));
+eq('补完列就能正常导入', $r3['inserted'], 2);
+$sPdo->setValue(null, null);
+Db::forTests(null);
+Store::resetPathCache();
+foreach ([$oldDb, $oldDb . '-wal', $oldDb . '-shm'] as $x) { @unlink($x); }
+foreach ([$f1, $f2, $real, $f4, $f5, $f6, $f7, $f7b, $f8, $f9, $f10, $f11] as $x) { @unlink($x); }
+Store::useMemoryForTests();
+
+// ---- 页面：核对这一步不能省 ----
+$miSrc = (string) file_get_contents($ROOT . '/meatimport.php');
+ok('上传后先预览，不直接入库',
+   strpos($miSrc, "act === 'upload'") !== false && strpos($miSrc, "act === 'import'") !== false);
+ok('上传和导入是两次提交', substr_count($miSrc, "name=\"act\"") >= 3);
+ok('校验 CSRF', strpos($miSrc, 'Auth::csrfValid') !== false);
+ok('要求登录', strpos($miSrc, 'Auth::requireLogin') !== false);
+// 只搜函数名会被【注释里提了一句】蒙混过去 —— 要搜真正的调用
+ok('确认上传的确是这次传上来的文件',
+   preg_match('/if\s*\(\s*!\s*is_uploaded_file\s*\(/', $miSrc) === 1);
+ok('限制文件类型', strpos($miSrc, 'xlsx|csv') !== false);
+ok('限制文件大小', strpos($miSrc, 'Xlsx::MAX_BYTES') !== false);
+ok('把认到的列摆出来给人核', strpos($miSrc, '认出来的列') !== false);
+ok('把均价摆出来（认错列的报警器）', strpos($miSrc, 'per_kg') !== false);
+ok('预览和导入必须是同一批', strpos($miSrc, 'stamp') !== false);
+ok('入库前二次确认', strpos($miSrc, 'onsubmit="return confirm(') !== false);
+ok('页面不碰主库', strpos($miSrc, 'Db::select') === false);
+ok('页面自己不拼 SQL', strpos($miSrc, 'SELECT ') === false);
+ok('上传的文件不落盘', strpos($miSrc, 'move_uploaded_file') === false);
+ok('用到 Report 就 require 了 report.php',
+   strpos($miSrc, 'Report::') === false
+   || strpos($miSrc, "require_once __DIR__ . '/lib/report.php'") !== false);
+// 三个子页要互相通得到，漏一个就等于这个功能不存在
+foreach (['meat.php', 'meatweek.php', 'meatimport.php'] as $pg) {
+    ok("{$pg} 的子标签里有发票导入",
+       strpos((string) file_get_contents($ROOT . '/' . $pg), 'meatimport.php') !== false);
+}
+
+// ---- Excel 的日期序号 ----
+eq('Excel 序号 45000 = 2023-03-15', Xlsx::toDate(45000), '2023-03-15');
+eq('Excel 序号 61 = 1900-03-01', Xlsx::toDate(61), '1900-03-01');
+eq('文本日期也认', Xlsx::toDate('2026-03-10'), '2026-03-10');
+eq('不是日期就返回 null', Xlsx::toDate('abc'), null);
+eq('超出合理范围的序号不当日期', Xlsx::toDate(999999), null);
+// 1–60 落在 Excel 那个「1900 年有 2 月 29 日」的错误区间里，算出来会差一天。
+// 与其给个差一天的日期，不如说不知道 —— 「件数」那种列里的小数字正好在这段。
+eq('小数字不当日期（差一天区间）', Xlsx::toDate(1), null);
+eq('60 也不当日期', Xlsx::toDate(60), null);
+ok('xlsx 解析禁掉了外部实体（XXE）',
+   strpos((string) file_get_contents($ROOT . '/lib/xlsx.php'), 'LIBXML_NONET') !== false);
+
+// =====================================================================
 echo "\n【2e2c】库存（存入 / 盘点 / 用量推算）\n";
 // =====================================================================
 
