@@ -164,6 +164,59 @@ CASES = [
      lambda r: edit(r, 'lib/meat.php', lambda s: s.replace(
          "if (($r['deleted_at'] ?? null) !== null) {\n                continue;",
          "if (false) {\n                continue;", 1))),
+    # ---- 发票导入 ----
+    ('导入时把退货行当成正常采购（合计会和发票对不上）',
+     lambda r: edit(r, 'lib/meatimport.php', lambda s: s.replace(
+         "($w !== null && $w < 0) || ($m !== null && $m < 0)", 'false', 1))),
+    ('未税金额不折算成含税就入库（和营业额不是一个口径）',
+     lambda r: edit(r, 'lib/meatimport.php', lambda s: s.replace(
+         '$total   = round($m * (1 + $r), 2);', '$total   = round($m, 2);', 1))),
+    ('认税率时不再排除「单价」（「未税单价」里也有 VAT，会被当成税率）',
+     lambda r: edit(r, 'lib/meatimport.php', lambda s: s.replace(
+         "'vat'       => ['税率', 'vat', '!' => ['单价', 'unit price', '金额', 'amount']],",
+         "'vat'       => ['税率', 'vat'],", 1))),
+    ('认发票号时不再排除「日期」（「发票日期」会被当成发票号）',
+     lambda r: edit(r, 'lib/meatimport.php', lambda s: s.replace(
+         "'invoice'   => ['发票号', 'invoice', '!' => ['日期', 'date']],",
+         "'invoice'   => ['发票号', 'invoice'],", 1))),
+    ('认金额时不再排除「单价」（含税单价和含税金额只差一个字）',
+     lambda r: edit(r, 'lib/meatimport.php', lambda s: s.replace(
+         "'money_inc' => ['含税金额', 'line amount incl', 'amount incl',\n"
+         "                        '!' => ['单价', 'unit price', '均价', 'average']],",
+         "'money_inc' => ['含税金额', 'line amount incl', 'amount incl', '含税'],", 1))),
+    ('去掉均价合理性检查（认错列就再也没有信号了）',
+     lambda r: edit(r, 'lib/meatimport.php', lambda s: s.replace(
+         "if ($s['per_kg'] !== null && ($s['per_kg'] < $lo || $s['per_kg'] > $hi)) {",
+         'if (false) {', 1))),
+    ('认不出品类就随便猜一个',
+     lambda r: edit(r, 'lib/meatimport.php', lambda s: s.replace(
+         "return isset($known[$t]) ? $t : null;",
+         "return isset($known[$t]) ? $t : (string) array_key_first($known);", 1))),
+    ('导入不带去重指纹（同一份文件导两次数据翻倍）',
+     lambda r: edit(r, 'lib/meat.php', lambda s: s.replace(
+         "':ik' => $key,", "':ik' => null,", 1))),
+    ('去掉 import_key 的唯一索引（只剩 PHP 里判，绕过就重复）',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         'CREATE UNIQUE INDEX IF NOT EXISTS idx_mp_impkey',
+         'CREATE INDEX IF NOT EXISTS idx_mp_impkey', 1))),
+    ('老库不补 import_key 这一列（升级后页面报 no such column）',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         "self::addColumn($pdo, 'meat_purchase', 'import_key', 'TEXT');", ';', 1))),
+    ('出错了却把已经写进去的那半批提交掉（不是回滚）',
+     lambda r: edit(r, 'lib/store.php', lambda s: s.replace(
+         '            $pdo->rollBack();', '            $pdo->commit();', 1))),
+    ('上传后直接入库，跳过核对那一步',
+     lambda r: edit(r, 'meatimport.php', lambda s: s.replace(
+         "} elseif ($act === 'import') {", '} elseif (false) {', 1))),
+    ('不校验上传的到底是不是这次传上来的文件',
+     lambda r: edit(r, 'meatimport.php', lambda s: s.replace(
+         'if (!is_uploaded_file($tmp)) {', 'if (false) {', 1))),
+    ('Excel 序号 1–60 也当日期（那段会差一天）',
+     lambda r: edit(r, 'lib/xlsx.php', lambda s: s.replace(
+         'if ($n < 61 || $n > 60000) {', 'if ($n < 1 || $n > 60000) {', 1))),
+    ('xlsx 解析放开外部实体（XXE）',
+     lambda r: edit(r, 'lib/xlsx.php', lambda s: s.replace(
+         'LIBXML_NONET | LIBXML_NOENT', '0', 1))),
 ]
 
 fails = 0

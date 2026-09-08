@@ -163,6 +163,7 @@ pageHeader('肉类采购', 'meat');
 
 <nav class="subtabs">
   <a href="meat.php" class="on">录入与明细</a>
+  <a href="meatimport.php">发票导入</a>
   <a href="meatweek.php">周报表</a>
 </nav>
 

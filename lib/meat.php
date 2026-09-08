@@ -251,6 +251,80 @@ final class Meat
         });
     }
 
+    /**
+     * 批量写入（发票导入用）。
+     *
+     * 整批一个事务：要么全进，要么一条不进。导一半失败最难收拾 ——
+     * 你不知道该从哪一行接着导，只能全删了重来，而「全删」本身又要人手动挑行。
+     *
+     * import_key 是发票行的指纹，带 UNIQUE 索引。同一份文件导两次，
+     * 第二次会被认出来跳过，而不是把数据翻一倍 —— 重复导入是这类功能
+     * 最常见的事故，而且事后从报表上看不出来（金额刚好翻倍，像是真进了这么多货）。
+     * 手工录入的行 import_key 为 NULL；SQLite 的 UNIQUE 索引不管 NULL，
+     * 所以多少条手工记录都不冲突。
+     *
+     * @param array $items [['clean' => validate() 出来的干净数据, 'key' => 指纹], …]
+     * @return array ['inserted' => 新增条数, 'duplicate' => 已在库里跳过的条数, 'ids' => […]]
+     */
+    public static function createMany(array $items): array
+    {
+        foreach ($items as $it) {
+            self::assertClean($it['clean'] ?? []);
+        }
+        return Store::transaction(static function () use ($items) {
+            $have = self::existingKeys(array_values(array_filter(
+                array_map(static fn($i) => $i['key'] ?? null, $items))));
+            $now = date('Y-m-d H:i:s');
+            $ids = [];
+            $dup = 0;
+            foreach ($items as $it) {
+                $key = $it['key'] ?? null;
+                if ($key !== null && isset($have[$key])) {
+                    $dup++;
+                    continue;
+                }
+                $c  = $it['clean'];
+                $id = Store::insert(
+                    'INSERT INTO meat_purchase
+                       (purchase_date, kind, weight_kg, unit_count, unit_type,
+                        price_basis, unit_price, total_price, supplier, note,
+                        import_key, created_at, updated_at)
+                     VALUES (:d, :k, :w, :n, :u, :b, :up, :tp, :s, :note, :ik, :c, :m)',
+                    [':d' => $c['purchase_date'], ':k' => $c['kind'],
+                     ':w' => $c['weight_kg'], ':n' => $c['unit_count'],
+                     ':u' => $c['unit_type'], ':b' => $c['price_basis'],
+                     ':up' => $c['unit_price'], ':tp' => $c['total_price'],
+                     ':s' => $c['supplier'], ':note' => $c['note'],
+                     ':ik' => $key, ':c' => $now, ':m' => $now]
+                );
+                Store::log($id, 'import', null, $c);
+                $ids[] = $id;
+                if ($key !== null) {
+                    $have[$key] = true;      // 同一批里出现两次也只进一条
+                }
+            }
+            return ['inserted' => count($ids), 'duplicate' => $dup, 'ids' => $ids];
+        });
+    }
+
+    /** 这些指纹里，哪些已经在库里了 => [指纹 => true]（含已作废的，免得重复导入） */
+    public static function existingKeys(array $keys): array
+    {
+        $out = [];
+        foreach (array_chunk(array_values(array_unique($keys)), 400) as $chunk) {
+            if (!$chunk) {
+                continue;
+            }
+            $ph = implode(',', array_fill(0, count($chunk), '?'));
+            foreach (Store::select(
+                "SELECT import_key FROM meat_purchase WHERE import_key IN ({$ph})",
+                $chunk) as $r) {
+                $out[(string) $r['import_key']] = true;
+            }
+        }
+        return $out;
+    }
+
     public static function update(int $id, array $clean): bool
     {
         self::assertClean($clean);

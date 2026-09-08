@@ -516,6 +516,24 @@ final class Store
         }
     }
 
+    /**
+     * 给已有的表补一列（没有就加，有了就什么都不做）。
+     *
+     * 建表走的是 CREATE TABLE IF NOT EXISTS —— 表已经存在时它一声不吭地跳过，
+     * 于是【老库永远拿不到新加的列】。升级之后页面报 "no such column"，
+     * 而开发机上因为是新建的库，怎么试都是好的。这个方法就是补这个洞。
+     *
+     * 表名和列名要拼进 SQL，所以只能是代码里写死的字面量 ——
+     * 这个方法是 private，外面传不进来东西。
+     */
+    private static function addColumn(PDO $pdo, string $table, string $col, string $type): void
+    {
+        $cols = $pdo->query("PRAGMA table_info({$table})")->fetchAll(PDO::FETCH_COLUMN, 1);
+        if (!in_array($col, $cols, true)) {
+            $pdo->exec("ALTER TABLE {$table} ADD COLUMN {$col} {$type}");
+        }
+    }
+
     /** 建表。CHECK 约束是最后一道防线 —— PHP 校验之外，数据库自己也拦。 */
     private static function migrate(PDO $pdo): void
     {
@@ -541,6 +559,9 @@ final class Store
                 total_price   REAL,
                 supplier      TEXT,
                 note          TEXT,
+                -- 发票导入的行指纹（手工录入的行是 NULL）。带 UNIQUE 索引，
+                -- 同一份发票导第二次会被挡在门外 —— 见下面 idx_mp_impkey
+                import_key    TEXT,
                 created_at    TEXT    NOT NULL,
                 updated_at    TEXT    NOT NULL,
                 deleted_at    TEXT,
@@ -555,6 +576,15 @@ final class Store
             SQL);
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_mp_date ON meat_purchase(purchase_date)');
         $pdo->exec('CREATE INDEX IF NOT EXISTS idx_mp_kind ON meat_purchase(kind, purchase_date)');
+
+        // 已经在用的库不会因为上面改了 CREATE TABLE 就多出一列 ——
+        // CREATE TABLE IF NOT EXISTS 遇到已存在的表什么都不做。补一次 ALTER。
+        self::addColumn($pdo, 'meat_purchase', 'import_key', 'TEXT');
+        // 发票行的指纹唯一：同一份文件导两次，第二次进不来。
+        // SQLite 的 UNIQUE 索引把每个 NULL 都当成互不相同，
+        // 所以手工录入的行（import_key 为 NULL）想有多少条就有多少条。
+        $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_mp_impkey
+                    ON meat_purchase(import_key)');
 
         // 留痕：每次改动记一条，存改动前后的快照
         $pdo->exec(<<<'SQL'
