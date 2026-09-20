@@ -2,8 +2,13 @@
 /**
  * 诊断：数据库里到底有没有「出了多少张单」这个数？
  *
- *     php tests/probe_ticket.php          # 默认看最近 7 天
- *     php tests/probe_ticket.php 14       # 看最近 14 天
+ *     php tests/probe_ticket.php          # 默认看最近 1 天
+ *     php tests/probe_ticket.php 7        # 看最近 7 天
+ *
+ * 也可以放到浏览器里访问（需要先登录）：
+ *
+ *     .../tests/probe_ticket.php          # 最近 1 天
+ *     .../tests/probe_ticket.php?days=7   # 最近 7 天
  *
  * 全程只执行 SELECT，不会改动任何数据（见「注意事项.md」铁律一）。
  *
@@ -53,9 +58,13 @@ if (!$cli) {
     echo '<pre style="font:13px/1.6 monospace;padding:16px">';
 }
 
-$days = 7;
-if ($cli && isset($argv[1]) && ctype_digit((string) $argv[1])) {
-    $days = max(1, min(92, (int) $argv[1]));
+// 默认只看 1 天。这是在【生产库】上跑的诊断，第 3、5 节要按
+// (单, 下单时刻) 分组，范围拉大会真的压到 MySQL 5.5 ——
+// 先用一天看结论，需要更大样本再手动加大。
+$days = 1;
+$arg  = $cli ? ($argv[1] ?? null) : ($_GET['days'] ?? null);
+if (is_string($arg) && ctype_digit($arg)) {
+    $days = max(1, min(92, (int) $arg));
 }
 
 $cfg  = Db::config();
