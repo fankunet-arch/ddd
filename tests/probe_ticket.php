@@ -450,6 +450,96 @@ foreach ($rows as $r) {
 }
 
 // =====================================================================
+say("\n===== 6b. 金额对得上吗？（明细那边 vs 账单头那边）=====");
+// =====================================================================
+// 岗位页的「金额」= SUM(actual_price * quantity)。这里有个不会报错的陷阱：
+// 如果 actual_price 存的其实是【行金额】而不是【单价】，这一乘就乘重了。
+// 放大的倍数正好是「平均每行几份」—— 一两倍而已，算出来的人均照样像真的。
+//
+// 账单头表的 actual_amount 是完全独立的来源（营业额统计页用的就是它）。
+// 两边一对，哪个口径对一目了然。
+//
+// ⚠️ 两张表的时间字段不同：账单头按【开台时间】，明细按【下单时间】。
+// 跨夜的单会分到不同区间里，所以允许几个百分点的出入，不必强求分毫不差。
+$head = Db::select(
+    'SELECT SUM(actual_amount) AS actual, COUNT(*) AS rows_cnt,
+            COUNT(DISTINCT order_head_id) AS orders
+     FROM history_order_head
+     WHERE order_start_time >= :from AND order_start_time < :to',
+    [':from' => $from, ':to' => $to])[0] ?? null;
+
+$det = Db::select(
+    'SELECT SUM(actual_price * quantity) AS by_unit,
+            SUM(actual_price)            AS by_line,
+            SUM(quantity)                AS qty,
+            COUNT(*)                     AS lines_cnt
+     FROM history_order_detail
+     WHERE order_time >= :from AND order_time < :to AND ' . DISH_ONLY,
+    [':from' => $from, ':to' => $to])[0] ?? null;
+
+// 不加任何过滤的那一份：付款方式行（-4）之类也算进来，看看是不是它们补上了差额
+$detAll = Db::select(
+    'SELECT SUM(actual_price * quantity) AS by_unit, SUM(actual_price) AS by_line
+     FROM history_order_detail
+     WHERE order_time >= :from AND order_time < :to',
+    [':from' => $from, ':to' => $to])[0] ?? null;
+
+$hv = (float) ($head['actual'] ?? 0);
+kv('账单头 实收合计', number_format($hv, 2) . '  （' . (int) ($head['orders'] ?? 0) . ' 张单）');
+say('    明细表这边，按三种口径各算一遍：');
+$cands = [
+    'actual_price × quantity（页面现在用的）' => (float) ($det['by_unit'] ?? 0),
+    'actual_price 直接相加（当成行金额）'     => (float) ($det['by_line'] ?? 0),
+    'actual_price × quantity（不过滤任何行）' => (float) ($detAll['by_unit'] ?? 0),
+];
+// 先算出每个口径离账单头差多少
+$diffs = [];
+foreach ($cands as $label => $v) {
+    $d = $hv > 0 ? ($v - $hv) / $hv * 100 : 0.0;
+    $diffs[$label] = $d;
+    printf("      %-42s %14s  差 %+7.1f%%\n", $label, number_format($v, 2), $d);
+}
+if (($det['lines_cnt'] ?? 0) > 0) {
+    kv('平均每行几份', sprintf('%.2f', (float) $det['qty'] / (int) $det['lines_cnt'])
+        . '  ← 认错口径的话，金额差不多就放大这么多倍');
+}
+
+// 判定顺序很讲究：【先看页面现在用的那个口径合不合格】，
+// 而不是挑「最接近的」。两个口径都在容差内时挑最接近的，会因为
+// 零点几个百分点的差就判页面错 —— 那是没事找事，改完还可能更糟。
+// 只有现用口径真的超出容差，才去找哪个对得上。
+$TOL   = 5.0;                     // 两张表时间字段不同，跨夜单会分岔，留 5% 容差
+$cur   = 'actual_price × quantity（页面现在用的）';
+$curD  = $diffs[$cur] ?? null;
+if ($hv <= 0) {
+    say('    → 账单头这边没金额，对不了。');
+    $verdict['money'] = null;
+} elseif ($curD !== null && abs($curD) <= $TOL) {
+    kv('页面现用口径', sprintf('差 %+.1f%%，在 ±%.0f%% 容差内', $curD, $TOL));
+    say('    → 页面现在的算法对得上账单头，金额可信。');
+    say('      也就是说：这一天的钱确实几乎全记在某一个岗位上，不是算错 ——');
+    say('      套餐挂在哪个岗位，钱就全算给哪个岗位。');
+    $verdict['money'] = true;
+} else {
+    asort($diffs);
+    $best = null;
+    foreach ($diffs as $label => $d) {
+        if ($best === null || abs($d) < abs($diffs[$best])) { $best = $label; }
+    }
+    kv('页面现用口径', sprintf('差 %+.1f%% —— 超出 ±%.0f%% 容差', (float) $curD, $TOL));
+    if (abs($diffs[$best]) <= $TOL) {
+        kv('对得上的是', $best . sprintf('（差 %+.1f%%）', $diffs[$best]));
+        say('    → ⚠️ 对得上的【不是】页面现在用的那个口径。');
+        say('      岗位页和菜品页的「金额」都要改成上面这一个。');
+    } else {
+        say('    → 三种口径都对不上账单头，差得还不小。');
+        say('      可能是服务费／税／退单只记在账单头那边，也可能是别的原因。');
+        say('      在弄清楚之前，岗位页和菜品页的「金额」列都不要当准数用。');
+    }
+    $verdict['money'] = false;
+}
+
+// =====================================================================
 say("\n===== 7. 几个会让「单数」算不准的字段 =====");
 // =====================================================================
 // not_print：配置成不打印的行，不该算进单数。
@@ -522,6 +612,11 @@ if (!empty($verdict['print_task'])) {
     say('  一个没验过的「张数」和一个合理的整数长得一模一样。');
 }
 say();
+if (($verdict['money'] ?? null) === false) {
+    say('⚠️ 另外：第 6b 节显示【金额】那一列的口径对不上账单头，');
+    say('   岗位页和菜品页的金额都要先查清楚再用。票数和份数不受影响。');
+    say();
+}
 say('无论哪种结论，有两件事永远数不到：重打的单、手工补打的单 ——');
 say('数据库里根本没有痕迹。所以这个数是「下单产生的票数」，不是「打印机吐了几张纸」。');
 say();
