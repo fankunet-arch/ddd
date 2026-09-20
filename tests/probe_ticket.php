@@ -31,8 +31,17 @@
  *        `BEFORE INSERT ... set NEW.order_time=now()`，也就是【写库那一刻】的时间；
  *        同一次下单一起写进去的几行，order_time 应当相同（精确到秒）。
  *
- *  本脚本就是去实测这两条线索对不对得上。对得上，「张数」就能算出来；
- *  对不上，就得老老实实说这个数出不来，而不是编一个看着像模像样的数字。
+ *  本脚本就是去实测这两条线索对不对得上。
+ *
+ *  实测下来两者差了 4 倍（甲 622 / 乙 2561），所以【对不上本身不是结论】，
+ *  得先分清是哪一边不对。两种可能，4b 和 4c 分别去证伪：
+ *    ① 乙虚高 —— 一次下单被拆成好几秒写库，一张票被数成两三张。
+ *       测法（4b）：同一张单里相邻两批隔多久。隔几秒是被拆开，隔几分钟是真的又点了一轮。
+ *    ② 甲残缺 —— 标记只在按某个特定键时才写，本来就不是每次下单都有。
+ *       测法（4c）：每个标记能不能在同一张单里找到时间贴得很近的一批菜。
+ *       能对上就说明标记是批次的子集，那是甲不全，不是乙虚高。
+ *
+ *  两边都测过再下结论，而不是编一个看着像模像样的数字。
  *
  * ============================================================
  *  为什么要先测，不能直接写进页面
@@ -111,65 +120,73 @@ try {
 }
 
 // =====================================================================
-say("\n===== 2. 线索甲：`Enviado` 送厨房标记行长什么样 =====");
+// 先把两份原始清单一次取回来，后面几节全在 PHP 里算。
+//
+// 为什么不在 SQL 里分别聚合：上一版就是那么做的，结果第 3 节的
+// 「批次总数」是从一个 LIMIT 20 的分布里累加出来的 —— 21 行以上的批次
+// 被悄悄截掉，总数少算了一截（实测 2545 vs 真实 2561）。
+// 截断型的错误最难发现：数字还是个合理的整数，只是偏小。
+// 一次取回全量、在 PHP 里算，就没有这个缝。
 // =====================================================================
+$batches = Db::select(
+    'SELECT order_head_id, order_time, COUNT(*) AS lines_cnt
+     FROM history_order_detail
+     WHERE order_time >= :from AND order_time < :to AND ' . DISH_ONLY . '
+     GROUP BY order_head_id, order_time
+     ORDER BY order_head_id, order_time',
+    [':from' => $from, ':to' => $to]);
+
 $marks = Db::select(
-    'SELECT order_head_id, menu_item_name, order_time, quantity
+    "SELECT order_head_id, menu_item_name, order_time,
+            COALESCE(pos_name, '(空)') AS pos_name
      FROM history_order_detail
      WHERE order_time >= :from AND order_time < :to AND menu_item_id = -3
-     ORDER BY order_detail_id DESC LIMIT 8',
+     ORDER BY order_head_id, order_time",
     [':from' => $from, ':to' => $to]);
+
+// =====================================================================
+say("\n===== 2. 线索甲：`Enviado` 送厨房标记行长什么样 =====");
+// =====================================================================
 if (!$marks) {
     say('    这段时间一行都没有 —— 线索甲不成立（也可能是这几天没营业，换个范围再试）。');
     $verdict['marks'] = false;
 } else {
-    foreach ($marks as $m) {
-        printf("    单 %-8s %-30s %s\n",
-               (string) $m['order_head_id'],
-               (string) $m['menu_item_name'],
-               (string) $m['order_time']);
+    foreach (array_slice($marks, -8) as $m) {
+        printf("    单 %-8s %-30s %-12s %s\n",
+               (string) $m['order_head_id'], (string) $m['menu_item_name'],
+               (string) $m['pos_name'], (string) $m['order_time']);
     }
-    say('    → 每送一次厨房写一行。注意名字里带的是【桌号和时分】，不带岗位 ——');
-    say('      也就是说它只告诉你「送了一次」，不告诉你「送给哪几个岗位」。');
+    say('    → 每按一次那个键写一行。名字里那个数字【不是桌号】——');
+    say('      同一张单里既出现过 999 又出现过 555，桌号不会中途变。');
+    say('      那是 POS 上的按键／宏编号，第 4c 节数一下各是多少。');
     $verdict['marks'] = true;
 }
 
 // =====================================================================
 say("\n===== 3. 线索乙：同一次下单的菜，order_time 是不是同一秒？ =====");
 // =====================================================================
-// 这是【决定性】的一节。如果绝大多数「批次」只有 1 行菜，
-// 说明 order_time 是逐行各写各的，根本不是批次标识，后面就都别算了。
-$dist = Db::select(
-    'SELECT lines_in_batch, COUNT(*) AS batches FROM (
-        SELECT order_head_id, order_time, COUNT(*) AS lines_in_batch
-        FROM history_order_detail
-        WHERE order_time >= :from AND order_time < :to AND ' . DISH_ONLY . '
-        GROUP BY order_head_id, order_time
-     ) b
-     GROUP BY lines_in_batch ORDER BY lines_in_batch LIMIT 20',
-    [':from' => $from, ':to' => $to]);
-
-$totalBatches = 0;
-$totalLines   = 0;
-$oneLine      = 0;
-foreach ($dist as $d) {
-    $b = (int) $d['batches'];
-    $l = (int) $d['lines_in_batch'];
-    $totalBatches += $b;
-    $totalLines   += $b * $l;
-    if ($l === 1) { $oneLine = $b; }
+// 如果绝大多数「批次」只有 1 行菜，说明 order_time 是逐行各写各的，
+// 根本不是批次标识，后面就都别算了。
+$dist = [];
+$totalLines = 0;
+foreach ($batches as $b) {
+    $l = (int) $b['lines_cnt'];
+    $dist[$l >= 21 ? 21 : $l] = ($dist[$l >= 21 ? 21 : $l] ?? 0) + 1;
+    $totalLines += $l;
 }
+ksort($dist);
+$totalBatches = count($batches);
 if ($totalBatches === 0) {
     say('    这段时间没有菜品行。');
     $verdict['batch'] = false;
 } else {
     say('    每批多少行菜 → 有多少批：');
-    foreach ($dist as $d) {
-        $b = (int) $d['batches'];
-        printf("      %2d 行  %6d 批  %5.1f%%  %s\n", (int) $d['lines_in_batch'], $b,
+    foreach ($dist as $l => $b) {
+        printf("      %s  %6d 批  %5.1f%%  %s\n",
+               $l >= 21 ? '21+ 行' : sprintf('%2d 行 ', $l), $b,
                $b / $totalBatches * 100, str_repeat('#', (int) round($b / $totalBatches * 40)));
     }
-    $pctOne = $oneLine / $totalBatches * 100;
+    $pctOne = ($dist[1] ?? 0) / $totalBatches * 100;
     kv('批次总数', $totalBatches);
     kv('菜品行总数', $totalLines);
     kv('平均每批', sprintf('%.2f 行', $totalLines / $totalBatches));
@@ -185,40 +202,187 @@ if ($totalBatches === 0) {
 }
 
 // =====================================================================
-say("\n===== 4. 两条线索对得上吗？（这是交叉验证，不是重复）=====");
+say("\n===== 4. 两条线索对得上吗？ =====");
 // =====================================================================
-// 甲（Enviado 标记数）和乙（不同 order_time 数）来路完全不同。
-// 两个数接近 = 它们指的是同一件事；差很多 = 至少有一个理解错了。
-$a = Db::select(
-    'SELECT COUNT(*) AS marks, COUNT(DISTINCT order_head_id) AS orders
-     FROM history_order_detail
-     WHERE order_time >= :from AND order_time < :to AND menu_item_id = -3',
-    [':from' => $from, ':to' => $to])[0] ?? ['marks' => 0, 'orders' => 0];
-$b = Db::select(
-    'SELECT COUNT(DISTINCT order_head_id, order_time) AS batches,
-            COUNT(DISTINCT order_head_id)             AS orders
-     FROM history_order_detail
-     WHERE order_time >= :from AND order_time < :to AND ' . DISH_ONLY,
-    [':from' => $from, ':to' => $to])[0] ?? ['batches' => 0, 'orders' => 0];
-
-kv('甲：Enviado 标记行数', (int) $a['marks']);
-kv('乙：不同的(单, 下单时刻)数', (int) $b['batches']);
-kv('涉及订单数（甲 / 乙）', (int) $a['orders'] . ' / ' . (int) $b['orders']);
-$mk = (int) $a['marks'];
-$bt = (int) $b['batches'];
-if ($mk > 0 && $bt > 0) {
-    $diff = abs($mk - $bt) / max($mk, $bt) * 100;
-    kv('相差', sprintf('%.1f%%', $diff));
-    if ($diff <= 15) {
-        say('    → 两条毫不相干的线索指向同一个数，可信。');
-        $verdict['agree'] = true;
-    } else {
-        say('    → 差得不少。可能的原因：下单后又加菜但没重新送厨房、');
-        say('      整桌取消、或者一次下单跨了秒。这个数要打折扣看。');
-        $verdict['agree'] = false;
-    }
+$orderOfMark  = count(array_unique(array_column($marks, 'order_head_id')));
+$orderOfBatch = count(array_unique(array_column($batches, 'order_head_id')));
+kv('甲：Enviado 标记行数', count($marks));
+kv('乙：不同的(单, 下单时刻)数', $totalBatches);
+kv('涉及订单数（甲 / 乙）', $orderOfMark . ' / ' . $orderOfBatch);
+if ($orderOfBatch > 0) {
+    kv('每张单平均下单几次（乙）', sprintf('%.2f 次', $totalBatches / $orderOfBatch));
+}
+if ($orderOfMark > 0) {
+    kv('每张单平均几个标记（甲）', sprintf('%.2f 个', count($marks) / $orderOfMark));
+}
+kv('有菜、却一个标记都没有的单', max(0, $orderOfBatch - $orderOfMark) . ' 张');
+$mk = count($marks);
+$diff = ($mk > 0 && $totalBatches > 0)
+      ? abs($mk - $totalBatches) / max($mk, $totalBatches) * 100 : 100.0;
+kv('相差', sprintf('%.1f%%', $diff));
+$verdict['agree'] = $diff <= 15;
+if ($verdict['agree']) {
+    say('    → 两条毫不相干的线索指向同一个数，可信。');
 } else {
-    $verdict['agree'] = false;
+    say('    → 差得不少。两种可能，下面 4b / 4c 分别去证伪：');
+    say('      ① 乙【虚高】：一次下单被拆成好几秒写库，一张票被数成两三张 → 看 4b');
+    say('      ② 甲【残缺】：标记只在按某个特定键时才写，本来就不是每次下单都有 → 看 4c');
+}
+
+// =====================================================================
+say("\n===== 4b. 同一张单里，相邻两批隔多久？（决定乙是不是虚高）=====");
+// =====================================================================
+// 这是分辨上面①②的关键。
+//   隔几秒  → 同一次下单被拆开了，乙虚高，得把它们合回去
+//   隔几分钟 → 就是真的又点了一轮，乙没问题
+$buckets = [5 => '≤5 秒', 15 => '6–15 秒', 60 => '16–60 秒',
+            300 => '1–5 分钟', 900 => '5–15 分钟', PHP_INT_MAX => '>15 分钟'];
+$gapHist = array_fill_keys(array_keys($buckets), 0);
+$gaps    = [];
+$prevOid = null;
+$prevTs  = null;
+foreach ($batches as $b) {
+    $oid = (int) $b['order_head_id'];
+    $ts  = strtotime((string) $b['order_time']);
+    if ($oid === $prevOid && $ts !== false && $prevTs !== null) {
+        $g = $ts - $prevTs;
+        $gaps[] = $g;
+        foreach ($buckets as $hi => $_) {
+            if ($g <= $hi) { $gapHist[$hi]++; break; }
+        }
+    }
+    $prevOid = $oid;
+    $prevTs  = $ts;
+}
+$nGap = count($gaps);
+if ($nGap === 0) {
+    say('    没有「同一张单里有两批以上」的情况，判断不了。');
+    $verdict['split'] = null;
+} else {
+    foreach ($buckets as $hi => $label) {
+        printf("      %-10s %6d 次  %5.1f%%  %s\n", $label, $gapHist[$hi],
+               $gapHist[$hi] / $nGap * 100,
+               str_repeat('#', (int) round($gapHist[$hi] / $nGap * 40)));
+    }
+    sort($gaps);
+    kv('间隔样本数', $nGap);
+    kv('中位间隔', gmdate('i:s', (int) $gaps[intdiv($nGap, 2)]) . ' （分:秒）');
+    $short = ($gapHist[5] + $gapHist[15]) / $nGap * 100;
+    kv('15 秒以内的占比', sprintf('%.1f%%', $short));
+
+    // 把间隔在 N 秒以内的相邻批次合成一批，看数字掉多少 —— 掉得多说明确实在拆
+    say('    如果把间隔 N 秒以内的相邻批次合并（当成同一次下单）：');
+    foreach ([5, 15, 30, 60, 120] as $tol) {
+        $merged = 0;
+        $pOid = null;
+        $pTs  = null;
+        foreach ($batches as $b) {
+            $oid = (int) $b['order_head_id'];
+            $ts  = strtotime((string) $b['order_time']);
+            if (!($oid === $pOid && $pTs !== null && $ts - $pTs <= $tol)) {
+                $merged++;
+            }
+            $pOid = $oid;
+            $pTs  = $ts;
+        }
+        printf("      %3d 秒内合并 → %6d 批（比原来少 %.1f%%）\n",
+               $tol, $merged, ($totalBatches - $merged) / $totalBatches * 100);
+    }
+    if ($short > 20) {
+        say('    → ⚠️ 相当一部分相邻批次只差十几秒，像是【同一次下单被拆开】。');
+        say('      直接用乙会偏多，应当按上面某个阈值合并之后再算。');
+        $verdict['split'] = true;
+    } else {
+        say('    → 相邻两批基本隔着几分钟，是真的又点了一轮，不是被拆开的。');
+        say('      乙没有虚高，可以直接用。');
+        $verdict['split'] = false;
+    }
+}
+
+// =====================================================================
+say("\n===== 4c. Enviado 标记到底从哪来？（决定甲是不是残缺）=====");
+// =====================================================================
+if (!$marks) {
+    say('    没有标记行，跳过。');
+    $verdict['subset'] = null;
+} else {
+    // ① 按键编号：名字形如 **555 Enviado 19:16**，那个数字是 POS 的按键／宏编号
+    $byKey = [];
+    foreach ($marks as $m) {
+        $key = preg_match('/^\*\*\s*(\d+)\s/u', (string) $m['menu_item_name'], $mm)
+             ? $mm[1] : '(认不出)';
+        $byKey[$key] = ($byKey[$key] ?? 0) + 1;
+    }
+    arsort($byKey);
+    say('    按名字里的编号分：');
+    foreach (array_slice($byKey, 0, 8, true) as $k => $n) {
+        kv((string) $k, $n . ' 行');
+    }
+
+    // ② 哪台机器写的：如果标记只来自某一台，那它天生就只覆盖一部分下单
+    $byPos = [];
+    foreach ($marks as $m) {
+        $byPos[(string) $m['pos_name']] = ($byPos[(string) $m['pos_name']] ?? 0) + 1;
+    }
+    arsort($byPos);
+    say('    标记行来自哪台 POS：');
+    foreach (array_slice($byPos, 0, 8, true) as $k => $n) {
+        kv((string) $k, $n . ' 行');
+    }
+    $dishPos = Db::select(
+        "SELECT COALESCE(pos_name, '(空)') AS pos_name, COUNT(*) AS n
+         FROM history_order_detail
+         WHERE order_time >= :from AND order_time < :to AND " . DISH_ONLY . "
+         GROUP BY pos_name ORDER BY n DESC LIMIT 8",
+        [':from' => $from, ':to' => $to]);
+    say('    作为对照，菜品行来自哪台 POS：');
+    foreach ($dishPos as $r) {
+        kv((string) $r['pos_name'], (int) $r['n'] . ' 行');
+    }
+
+    // ③ 每个标记，能不能在同一张单里找到时间贴得很近的一批菜？
+    //    能对上 = 标记是批次的【子集】，那就是甲残缺而不是乙虚高。
+    $byOrder = [];
+    foreach ($batches as $b) {
+        $byOrder[(int) $b['order_head_id']][] = strtotime((string) $b['order_time']);
+    }
+    $near = ['0' => 0, '5' => 0, '60' => 0, '300' => 0, 'far' => 0, 'none' => 0];
+    foreach ($marks as $m) {
+        $oid = (int) $m['order_head_id'];
+        $ts  = strtotime((string) $m['order_time']);
+        if (!isset($byOrder[$oid]) || $ts === false) {
+            $near['none']++;
+            continue;
+        }
+        $best = null;
+        foreach ($byOrder[$oid] as $bt) {
+            $d = abs($bt - $ts);
+            if ($best === null || $d < $best) { $best = $d; }
+        }
+        if ($best === null)     { $near['none']++; }
+        elseif ($best === 0)    { $near['0']++; }
+        elseif ($best <= 5)     { $near['5']++; }
+        elseif ($best <= 60)    { $near['60']++; }
+        elseif ($best <= 300)   { $near['300']++; }
+        else                    { $near['far']++; }
+    }
+    say('    每个标记离同一张单里最近的一批菜有多远：');
+    $labels = ['0' => '同一秒', '5' => '5 秒内', '60' => '1 分钟内',
+               '300' => '5 分钟内', 'far' => '更远', 'none' => '这张单压根没有菜'];
+    foreach ($labels as $k => $lb) {
+        kv($lb, $near[$k] . ' 个  ' . sprintf('%.1f%%', $near[$k] / count($marks) * 100));
+    }
+    $hit = ($near['0'] + $near['5'] + $near['60']) / count($marks) * 100;
+    kv('1 分钟内能对上的比例', sprintf('%.1f%%', $hit));
+    if ($hit >= 90) {
+        say('    → 标记几乎都落在某一批菜上，说明它是批次的【子集】：');
+        say('      不是每次下单都写标记，只有按那个键时才写。');
+        say('      所以是【甲残缺】，不是乙虚高 —— 该用乙。');
+        $verdict['subset'] = true;
+    } else {
+        say('    → 有不少标记对不上任何一批菜，两者说的可能不是一回事，别急着用。');
+        $verdict['subset'] = false;
+    }
 }
 
 // =====================================================================
@@ -327,22 +491,39 @@ say("\n" . str_repeat('=', 60));
 // =====================================================================
 $okBatch = !empty($verdict['batch']);
 $okAgree = !empty($verdict['agree']);
+$split   = $verdict['split']  ?? null;   // 乙是不是被拆开了（虚高）
+$subset  = $verdict['subset'] ?? null;   // 甲是不是只覆盖了一部分（残缺）
+
 if (!empty($verdict['print_task'])) {
     say('结论：print_task 里居然有历史 —— 先去看它，那比推算准。');
-} elseif ($okBatch && $okAgree) {
-    say('结论：可以算。');
-    say('  「单数」= COUNT(DISTINCT order_head_id, order_time)，按岗位分组。');
-    say('  两条独立线索（Enviado 标记 / 下单时刻）对得上，第 6 节那一列可以用。');
-    say('  仍要记住：这是【推算】，不是数据库记下来的事实 ——');
-    say('  重打的单、手工补打的单，数据库里根本没有痕迹，永远数不到。');
-} elseif ($okBatch) {
-    say('结论：能算，但两条线索对不上（见第 4 节），数字要打折扣看。');
-    say('  建议先弄清差异来自哪里，再决定要不要把这一列放上页面。');
-} else {
+} elseif (!$okBatch) {
     say('结论：算不出来。order_time 不是「一次下单」的标识（见第 3 节），');
     say('  数据库里也没有别的地方记着出了几张单。');
     say('  硬算的话得到的是「菜品行数」，不是「单数」—— 那是个看着合理的错数字。');
+} elseif ($okAgree) {
+    say('结论：可以算。');
+    say('  「单数」= COUNT(DISTINCT order_head_id, order_time)，按岗位分组。');
+    say('  两条独立线索（Enviado 标记 / 下单时刻）对得上，第 6 节那一列可以用。');
+} elseif ($split === false && $subset === true) {
+    // 两条线索数目差很多，但差异【已经解释清楚了】：
+    // 4b 说批次不是被拆出来的，4c 说标记只是批次的一个子集。
+    say('结论：可以算，用乙（下单时刻）。');
+    say('  「单数」= COUNT(DISTINCT order_head_id, order_time)，按岗位分组。');
+    say('  两条线索数目差很多，但 4b + 4c 已经把差异解释清楚了：');
+    say('    · 4b：相邻两批隔着几分钟，不是同一次下单被拆开 → 乙没虚高');
+    say('    · 4c：标记几乎都落在某一批菜上 → 标记是批次的子集，甲本来就不全');
+} elseif ($split === true) {
+    say('结论：先别直接用。4b 显示一次下单会被拆成好几秒写库，');
+    say('  直接数 (单, 下单时刻) 会偏多。要用的话得先按一个秒数阈值合并 ——');
+    say('  4b 那张表列了几个阈值各自的结果，挑一个和 4c 对得上的。');
+} else {
+    say('结论：能算，但两条线索的差异还没解释清楚（见 4b / 4c）。');
+    say('  弄清楚之前，别把这一列放上页面 —— ');
+    say('  一个没验过的「张数」和一个合理的整数长得一模一样。');
 }
+say();
+say('无论哪种结论，有两件事永远数不到：重打的单、手工补打的单 ——');
+say('数据库里根本没有痕迹。所以这个数是「下单产生的票数」，不是「打印机吐了几张纸」。');
 say();
 
 if (!$cli) {
