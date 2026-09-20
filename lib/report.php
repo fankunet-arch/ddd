@@ -774,15 +774,24 @@ final class Report
     /** 岗位单量统计的空单元 */
     private static function zeroStation(): array
     {
-        return ['orders' => 0, 'items' => 0, 'qty' => 0.0, 'lines' => 0, 'amount' => 0.0];
+        return ['orders' => 0, 'tickets' => 0, 'items' => 0,
+                'qty' => 0.0, 'lines' => 0, 'amount' => 0.0];
     }
 
     /**
      * 整理 Biz::stationVolume() 的结果（可能来自历史表 + 实时表两次查询）。
      *
-     * 注意 orders（单量）和 items（菜品数）都是数据库端算的 DISTINCT 值，
-     * 跨表相加会有重复计的可能 —— 但历史表与实时表装的是不同时期的单，
-     * 不会重叠，所以直接相加是安全的。
+     * 名词对照（踩过一次坑，写清楚）：
+     *   orders  桌数     —— 涉及多少张账单
+     *   tickets 下单次数 —— 该岗位参与了多少次下单（同一秒写进去的算一次）
+     *   lines   票数     —— 明细行数。这家店的打印机是【一道菜一张单】，
+     *                       所以「这道菜被点了几次」就是「出了几张票」。
+     *                       份数（qty）不拆票：一行「拉面 ×2」还是一张。
+     *
+     * 注意 orders（桌数）、tickets（下单次数）和 items（菜品数）都是数据库端算的
+     * DISTINCT 值，跨表相加会有重复计的可能 —— 但历史表与实时表装的是不同
+     * 时期的单，不会重叠，所以直接相加是安全的。
+     * 时段（白天/晚上/时段外）之间同理：一批菜只落在一个时段里。
      *
      * @return array ['stations' => [...], 'grand' => ['day'=>..,'night'=>..,'gap'=>..,'total'=>..]]
      */
@@ -805,7 +814,10 @@ final class Report
                     ];
                 }
                 $cell = [
-                    'orders' => (int) $r['orders'],
+                    'orders'  => (int) $r['orders'],
+                    // 老结果集可能没有这一列（升级中途的缓存等），缺了就当 0，
+                    // 不要让整页崩在一个新加的字段上
+                    'tickets' => (int) ($r['tickets'] ?? 0),
                     'items'  => (int) $r['items'],
                     'qty'    => (float) $r['qty'],
                     'lines'  => (int) $r['lines_cnt'],
@@ -836,7 +848,9 @@ final class Report
     /** 按指定指标给岗位排名（降序）；数值相同时按岗位名排，保证结果稳定 */
     public static function sortStations(array $stations, string $by): array
     {
-        $key = in_array($by, ['orders', 'qty', 'lines', 'amount'], true) ? $by : 'orders';
+        // 默认按 lines（= 票数）排：这家店一道菜一张单，它才是厨房的真实工作量
+        $key = in_array($by, ['lines', 'tickets', 'orders', 'qty', 'amount'], true)
+             ? $by : 'lines';
         usort($stations, static function ($a, $b) use ($key) {
             $cmp = $b['total'][$key] <=> $a['total'][$key];
             return $cmp !== 0 ? $cmp : strcmp($a['pc_name'], $b['pc_name']);

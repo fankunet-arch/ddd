@@ -217,6 +217,63 @@ CASES = [
     ('xlsx 解析放开外部实体（XXE）',
      lambda r: edit(r, 'lib/xlsx.php', lambda s: s.replace(
          'LIBXML_NONET | LIBXML_NOENT', '0', 1))),
+    # ---- 出单量诊断脚本 ----
+    ('诊断脚本自己拼一份「菜品→岗位」映射（迟早和岗位页对不上）',
+     lambda r: edit(r, 'tests/probe_ticket.php', lambda s: s.replace(
+         '$pcExpr = Biz::pcCaseExpr($pcOfItem);',
+         "$pcExpr = 'CASE WHEN menu_item_id IN (1) THEN 1 ELSE -2 END';", 1))),
+    ('诊断脚本里混进写语句（它是要连真库跑的）',
+     lambda r: append(r, 'tests/probe_ticket.php',
+                      '\n<?php $x = "UPDATE order_head SET status = 1"; ?>\n')),
+    ('诊断脚本绕过 Db 另开连接（就没有只读检查了）',
+     lambda r: edit(r, 'tests/probe_ticket.php', lambda s: s.replace(
+         '$marks = Db::select(', '$pdo = new PDO("mysql:host=x");$marks = Db::select(', 1))),
+    # ---- 岗位票数 ----
+    ('票数丢掉 order_time（就退化成桌数了，两列一模一样）',
+     lambda r: edit(r, 'lib/biz.php', lambda s: s.replace(
+         'COUNT(DISTINCT order_head_id, order_time) AS tickets',
+         'COUNT(DISTINCT order_head_id) AS tickets', 1))),
+    ('票数和桌数共用一个累加值',
+     lambda r: edit(r, 'lib/report.php', lambda s: s.replace(
+         "'tickets' => (int) ($r['tickets'] ?? 0),",
+         "'tickets' => (int) $r['orders'],", 1))),
+    ('结果集缺 tickets 列时直接崩（升级中途就白屏）',
+     lambda r: edit(r, 'lib/report.php', lambda s: s.replace(
+         "(int) ($r['tickets'] ?? 0)", "(int) $r['tickets']", 1))),
+    ('票数改回按「一次下单一张」算（这家店是一道菜一张，会少算一半）',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         '<td class="n strong"><?= num($T[\'lines\']) ?></td>',
+         '<td class="n strong"><?= num($T[\'tickets\']) ?></td>', 1))),
+    ('白天/晚上票数和全天用不同口径（加起来就对不上了）',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         "num($s['day']['lines'])", "num($s['day']['tickets'])", 1))),
+    ('拿掉「一道菜一张单」这个口径说明',
+     lambda r: edit(r, 'station.php', lambda s: s.replace('一道菜一张单', '一次下单一张单'))),
+    ('金额全压在一个岗位上也不吭声',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         "$amtSkew = $G['total']['amount'] > 0 && $topAmt / $G['total']['amount'] >= 0.9;",
+         '$amtSkew = false;', 1))),
+    ('拿掉「数据库里没有打印记录」那句提醒',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         '<strong>数据库里没有打印记录</strong>', '数据库记着每一张打印记录', 1))),
+    ('下单次数那一列被删掉（只剩票数，看不出岗位被叫了几次）',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         '<th class="n hide-sm">下单次数</th>', '', 1))),
+    # ---- 金额口径 ----
+    # actual_price 就是行金额。再乘一次 quantity 会虚高，而且算出来的数
+    # 「看着完全合理」—— 这个 bug 原来就是这么活下来的。
+    ('金额又乘回 quantity（岗位页）',
+     lambda r: edit(r, 'lib/biz.php', lambda s: s.replace(
+         "    public const MONEY_EXPR = 'actual_price';",
+         "    public const MONEY_EXPR = 'actual_price * quantity';", 1))),
+    ('只把菜品页的金额乘回 quantity（其余不动）',
+     lambda r: edit(r, 'lib/biz.php', lambda s: s.replace(
+         'SUM({$money})                  AS amount',
+         'SUM({$money} * quantity)       AS amount', 1))),
+    ('改金额口径时顺手把份数也改了',
+     lambda r: edit(r, 'lib/biz.php', lambda s: s.replace(
+         'SUM(quantity)                             AS qty,',
+         'SUM(1)                                    AS qty,', 1))),
 ]
 
 fails = 0
