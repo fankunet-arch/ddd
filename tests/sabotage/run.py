@@ -217,6 +217,17 @@ CASES = [
     ('xlsx 解析放开外部实体（XXE）',
      lambda r: edit(r, 'lib/xlsx.php', lambda s: s.replace(
          'LIBXML_NONET | LIBXML_NOENT', '0', 1))),
+    # ---- 出单量诊断脚本 ----
+    ('诊断脚本自己拼一份「菜品→岗位」映射（迟早和岗位页对不上）',
+     lambda r: edit(r, 'tests/probe_ticket.php', lambda s: s.replace(
+         '$pcExpr = Biz::pcCaseExpr($pcOfItem);',
+         "$pcExpr = 'CASE WHEN menu_item_id IN (1) THEN 1 ELSE -2 END';", 1))),
+    ('诊断脚本里混进写语句（它是要连真库跑的）',
+     lambda r: append(r, 'tests/probe_ticket.php',
+                      '\n<?php $x = "UPDATE order_head SET status = 1"; ?>\n')),
+    ('诊断脚本绕过 Db 另开连接（就没有只读检查了）',
+     lambda r: edit(r, 'tests/probe_ticket.php', lambda s: s.replace(
+         '$marks = Db::select(', '$pdo = new PDO("mysql:host=x");$marks = Db::select(', 1))),
 ]
 
 fails = 0

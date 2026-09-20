@@ -393,13 +393,19 @@ final class Biz
         return Db::select($sql, $params);
     }
 
-    /** 构造岗位单量 SQL。独立出来便于单独校验，不访问数据库。 */
-    public static function buildStationSql(string $from, string $to, string $table,
-                                           array $pcOfItem, array $opts = []): array
+    /**
+     * 「菜品ID → 岗位」编译成一个 SQL 表达式：CASE WHEN menu_item_id IN (…) THEN 岗位 …
+     *
+     * 抽成公用的，是因为不止一处要用（岗位统计、诊断脚本）。
+     * 各写各的话，两边对「这道菜归哪个岗位」的判断迟早会不一致，
+     * 而不一致的两个数字摆在一起，没人分得清哪个才是对的。
+     *
+     * 所有 ID 强制 (int) 后才拼进 SQL，不可能带入非数字内容。
+     *
+     * @param array $pcOfItem item_id => print_class|null（来自 menuItems()）
+     */
+    public static function pcCaseExpr(array $pcOfItem): string
     {
-        $table = self::safeTable($table, ['history_order_detail', 'order_detail']);
-
-        // 按岗位把菜品 ID 归堆。所有 ID 强制转成整数后拼进 SQL，不可能带入非数字内容。
         $byPc = [];
         foreach ($pcOfItem as $itemId => $pc) {
             $id = (int) $itemId;
@@ -415,9 +421,17 @@ final class Biz
             $cases .= ' WHEN menu_item_id IN (' . implode(',', $ids) . ') THEN ' . (int) $pc;
         }
         // 字典里查不到的菜品（多半是后来被删掉的）单独归一类，不和「未配岗位」混淆
-        $pcExpr = $cases === ''
+        return $cases === ''
             ? (string) self::PC_UNKNOWN
             : 'CASE' . $cases . ' ELSE ' . self::PC_UNKNOWN . ' END';
+    }
+
+    /** 构造岗位单量 SQL。独立出来便于单独校验，不访问数据库。 */
+    public static function buildStationSql(string $from, string $to, string $table,
+                                           array $pcOfItem, array $opts = []): array
+    {
+        $table  = self::safeTable($table, ['history_order_detail', 'order_detail']);
+        $pcExpr = self::pcCaseExpr($pcOfItem);
 
         $where  = ['order_time >= :from', 'order_time < :to'];
         $params = [':from' => $from, ':to' => $to];

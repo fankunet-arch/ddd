@@ -37,6 +37,30 @@ function eq(string $name, $actual, $expected): void
     ok($name, $actual == $expected, 'got ' . var_export($actual, true) . ', want ' . var_export($expected, true));
 }
 
+/**
+ * 去掉注释之后的 PHP 源码。
+ *
+ * 扫源码找关键字时，注释是【两头都会骗人】的：
+ *   - 注释里提了一句 is_uploaded_file，于是「有没有真的调用」白白通过（第 16 条）
+ *   - 注释里引用了一句 `BEFORE INSERT …` 触发器定义，于是「只做 SELECT」白白失败
+ * 所以一律用 PHP 自己的分词器把注释摘掉再扫，不靠正则猜。
+ */
+function phpCode(string $src): string
+{
+    $out = '';
+    foreach (token_get_all($src) as $t) {
+        if (is_array($t)) {
+            if ($t[0] === T_COMMENT || $t[0] === T_DOC_COMMENT) {
+                continue;
+            }
+            $out .= $t[1];
+        } else {
+            $out .= $t;
+        }
+    }
+    return $out;
+}
+
 function throws(string $name, callable $fn): void
 {
     try {
@@ -643,6 +667,28 @@ ok('合法 ID 保留', strpos($bsql, 'IN (5,7)') !== false);
 ok('剔除后 SQL 仍通过只读检查', (static function () use ($bsql) {
     try { Db::assertReadOnly($bsql); return true; } catch (Throwable $e) { return false; }
 })());
+
+// ---- 「菜品→岗位」只能有一份定义 ----
+// 岗位页和诊断脚本都要这份映射。各写各的话，两边对「这道菜归哪个岗位」
+// 的判断迟早会不一致 —— 而两个不一致的数字摆在一起，没人分得清哪个对。
+eq('岗位页用的就是公用的那份映射',
+   strpos($ssql, Biz::pcCaseExpr($pcMap)) !== false, true);
+ok('公用映射单独拿出来也通过只读检查', (static function () use ($pcMap) {
+    try { Db::assertReadOnly('SELECT ' . Biz::pcCaseExpr($pcMap) . ' FROM t'); return true; }
+    catch (Throwable $e) { return false; }
+})());
+$probeSrc = (string) file_get_contents($ROOT . '/tests/probe_ticket.php');
+ok('诊断脚本不自己拼一份岗位映射',
+   strpos($probeSrc, 'Biz::pcCaseExpr') !== false
+   && strpos($probeSrc, 'WHEN menu_item_id IN') === false);
+// 诊断脚本会连真库跑，必须只读 —— 铁律一。
+// 只扫代码不扫注释：这个文件的注释里引用了一句触发器定义（BEFORE INSERT …），
+// 那是文档不是语句，连注释一起扫的话这条断言会为了一句说明而失败。
+ok('诊断脚本只做 SELECT',
+   !preg_match('/\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\s/i',
+               phpCode($probeSrc)));
+ok('诊断脚本走 Db（那里有只读检查）', strpos($probeSrc, 'Db::select') !== false);
+ok('诊断脚本不另开数据库连接', strpos($probeSrc, 'new PDO') === false);
 
 // ---- 岗位结果聚合与排名 ----
 $pcs2 = [6 => 'bebidas', 11 => '热菜'];
