@@ -228,6 +228,28 @@ CASES = [
     ('诊断脚本绕过 Db 另开连接（就没有只读检查了）',
      lambda r: edit(r, 'tests/probe_ticket.php', lambda s: s.replace(
          '$marks = Db::select(', '$pdo = new PDO("mysql:host=x");$marks = Db::select(', 1))),
+    # ---- 岗位票数 ----
+    ('票数丢掉 order_time（就退化成桌数了，两列一模一样）',
+     lambda r: edit(r, 'lib/biz.php', lambda s: s.replace(
+         'COUNT(DISTINCT order_head_id, order_time) AS tickets',
+         'COUNT(DISTINCT order_head_id) AS tickets', 1))),
+    ('票数和桌数共用一个累加值',
+     lambda r: edit(r, 'lib/report.php', lambda s: s.replace(
+         "'tickets' => (int) ($r['tickets'] ?? 0),",
+         "'tickets' => (int) $r['orders'],", 1))),
+    ('结果集缺 tickets 列时直接崩（升级中途就白屏）',
+     lambda r: edit(r, 'lib/report.php', lambda s: s.replace(
+         "(int) ($r['tickets'] ?? 0)", "(int) $r['tickets']", 1))),
+    ('岗位页的票数列改回读 orders',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         "num($T['tickets'])", "num($T['orders'])", 1))),
+    ('金额全压在一个岗位上也不吭声',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         "$amtSkew = $G['total']['amount'] > 0 && $topAmt / $G['total']['amount'] >= 0.9;",
+         '$amtSkew = false;', 1))),
+    ('拿掉「票数是推算出来的」那句提醒',
+     lambda r: edit(r, 'station.php', lambda s: s.replace(
+         '<strong>票数是推算出来的</strong>', '票数就是打印机出的张数', 1))),
 ]
 
 fails = 0

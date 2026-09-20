@@ -642,8 +642,13 @@ ok('岗位 SQL 通过只读检查', (static function () use ($ssql) {
 })());
 ok('岗位 SQL 未做 JOIN', stripos($ssql, 'join') === false);
 ok('岗位 SQL 只查明细表', substr_count($ssql, 'history_order_detail') === 1);
-ok('单量用 COUNT(DISTINCT order_head_id)',
+ok('桌数用 COUNT(DISTINCT order_head_id)',
    strpos($ssql, 'COUNT(DISTINCT order_head_id)') !== false);
+// 票数：同一张单里同一秒写进去的菜算一次下单，所以键是 (单, 下单时刻)。
+// 少了 order_time 就退化成桌数 —— 那正是这一列要补的缺口。
+ok('票数用 COUNT(DISTINCT order_head_id, order_time)',
+   strpos($ssql, 'COUNT(DISTINCT order_head_id, order_time) AS tickets') !== false);
+ok('票数和桌数是两列，不是一列', substr_count($ssql, 'COUNT(DISTINCT order_head_id') === 2);
 ok('热菜岗位的菜品被编进 IN 列表', strpos($ssql, 'IN (1,2,3) THEN 11') !== false);
 ok('饮料岗位的菜品被编进 IN 列表', strpos($ssql, 'IN (431,432) THEN 6') !== false);
 ok('未配岗位归为 ' . Biz::PC_NONE, strpos($ssql, 'IN (900) THEN -1') !== false);
@@ -693,21 +698,46 @@ ok('诊断脚本不另开数据库连接', strpos($probeSrc, 'new PDO') === fals
 // ---- 岗位结果聚合与排名 ----
 $pcs2 = [6 => 'bebidas', 11 => '热菜'];
 $stRows = [
-    ['pc' => 11, 'seg' => 'day',   'orders' => 30, 'items' => 3, 'qty' => 50, 'lines_cnt' => 40, 'amount' => 0],
-    ['pc' => 11, 'seg' => 'night', 'orders' => 20, 'items' => 3, 'qty' => 35, 'lines_cnt' => 25, 'amount' => 0],
-    ['pc' => 6,  'seg' => 'day',   'orders' => 45, 'items' => 2, 'qty' => 60, 'lines_cnt' => 55, 'amount' => 180.0],
-    ['pc' => -1, 'seg' => 'day',   'orders' => 2,  'items' => 1, 'qty' => 2,  'lines_cnt' => 2,  'amount' => 0],
-    ['pc' => -2, 'seg' => 'night', 'orders' => 1,  'items' => 1, 'qty' => 1,  'lines_cnt' => 1,  'amount' => 0],
+    ['pc' => 11, 'seg' => 'day',   'orders' => 30, 'tickets' => 66, 'items' => 3, 'qty' => 50, 'lines_cnt' => 40, 'amount' => 0],
+    ['pc' => 11, 'seg' => 'night', 'orders' => 20, 'tickets' => 44, 'items' => 3, 'qty' => 35, 'lines_cnt' => 25, 'amount' => 0],
+    ['pc' => 6,  'seg' => 'day',   'orders' => 45, 'tickets' => 60, 'items' => 2, 'qty' => 60, 'lines_cnt' => 55, 'amount' => 180.0],
+    ['pc' => -1, 'seg' => 'day',   'orders' => 2,  'tickets' => 2,  'items' => 1, 'qty' => 2,  'lines_cnt' => 2,  'amount' => 0],
+    ['pc' => -2, 'seg' => 'night', 'orders' => 1,  'tickets' => 1,  'items' => 1, 'qty' => 1,  'lines_cnt' => 1,  'amount' => 0],
 ];
 $stLive = [
-    ['pc' => 11, 'seg' => 'night', 'orders' => 5, 'items' => 1, 'qty' => 6, 'lines_cnt' => 6, 'amount' => 0],
+    ['pc' => 11, 'seg' => 'night', 'orders' => 5, 'tickets' => 9, 'items' => 1, 'qty' => 6, 'lines_cnt' => 6, 'amount' => 0],
 ];
 $sb = Report::buildStations($pcs2, $stRows, $stLive);
 
 eq('岗位数（含未分配与已删除）', count($sb['stations']), 4);
 $byPc = [];
 foreach ($sb['stations'] as $s) { $byPc[$s['pc']] = $s; }
-eq('热菜全天单量 = 30 + 20 + 实时 5', $byPc[11]['total']['orders'], 55);
+eq('热菜全天桌数 = 30 + 20 + 实时 5', $byPc[11]['total']['orders'], 55);
+// 票数和桌数必须各算各的：加错一边，页面上两列会变成同一个数
+eq('热菜全天票数 = 66 + 44 + 实时 9', $byPc[11]['total']['tickets'], 119);
+eq('热菜白天票数', $byPc[11]['day']['tickets'], 66);
+eq('热菜晚上票数 = 44 + 实时 9', $byPc[11]['night']['tickets'], 53);
+ok('票数和桌数确实是两个不同的数',
+   $byPc[11]['total']['tickets'] !== $byPc[11]['total']['orders']);
+eq('合计票数', $sb['grand']['total']['tickets'], 66 + 44 + 9 + 60 + 2 + 1);
+// 结果集里没有 tickets 这一列时不能整页崩掉（升级中途、老缓存）。
+// 注意【必须连警告一起测】：写成 (int) $r['tickets'] 的话，键不存在只是
+// 一条 Warning，(int) null 照样是 0 —— 只看返回值的话这条检查永远通过，
+// 而线上页面会多出一行 PHP 警告。把警告也变成失败才算真测到。
+set_error_handler(static function ($no, $str) { throw new ErrorException($str, 0, $no); });
+try {
+    $noTk = Report::buildStations($pcs2, [
+        ['pc' => 11, 'seg' => 'day', 'orders' => 3, 'items' => 1, 'qty' => 4,
+         'lines_cnt' => 4, 'amount' => 0],
+    ]);
+    $tkOk  = ($noTk['stations'][0]['total']['tickets'] ?? null) === 0;
+    $tkWhy = '';
+} catch (Throwable $e) {
+    $tkOk  = false;
+    $tkWhy = $e->getMessage();
+}
+restore_error_handler();
+ok('缺 tickets 列时当 0 处理，且不冒警告', $tkOk, $tkWhy);
 eq('热菜白天单量', $byPc[11]['day']['orders'], 30);
 eq('热菜晚上单量 = 20 + 实时 5', $byPc[11]['night']['orders'], 25);
 eq('bebidas 全天单量', $byPc[6]['total']['orders'], 45);
@@ -718,15 +748,38 @@ eq('合计单量', $sb['grand']['total']['orders'], 30 + 20 + 5 + 45 + 2 + 1);
 eq('白天合计单量', $sb['grand']['day']['orders'], 30 + 45 + 2);
 
 $ranked = Report::sortStations($sb['stations'], 'orders');
-eq('按单量排名第 1', $ranked[0]['pc_name'], '热菜');       // 55
-eq('按单量排名第 2', $ranked[1]['pc_name'], 'bebidas');    // 45
+eq('按桌数排名第 1', $ranked[0]['pc_name'], '热菜');       // 55
+eq('按桌数排名第 2', $ranked[1]['pc_name'], 'bebidas');    // 45
+$byTk = Report::sortStations($sb['stations'], 'tickets');
+eq('按票数排名第 1', $byTk[0]['pc_name'], '热菜');         // 119
+eq('按票数排名第 2', $byTk[1]['pc_name'], 'bebidas');      // 60
 $byQty = Report::sortStations($sb['stations'], 'qty');
 eq('按份数排名第 1', $byQty[0]['pc_name'], '热菜');        // 50+35+6=91 > bebidas 60
 eq('按份数排名第 2', $byQty[1]['pc_name'], 'bebidas');     // 60
 $byAmt = Report::sortStations($sb['stations'], 'amount');
 eq('按金额排名第 1', $byAmt[0]['pc_name'], 'bebidas');     // 180
-ok('非法排序字段回退到单量',
+ok('非法排序字段回退到票数',
    Report::sortStations($sb['stations'], '乱写')[0]['pc_name'] === '热菜');
+
+// ---- 岗位页：票数这一列必须真的印出来，并且和桌数分得开 ----
+$stSrc = (string) file_get_contents($ROOT . '/station.php');
+ok('页面有票数列', strpos($stSrc, '全天票数') !== false);
+ok('页面仍保留桌数列', strpos($stSrc, '>桌数<') !== false);
+ok('全天票数那一格取的是 tickets，不是 orders',
+   strpos($stSrc, '<td class="n strong"><?= num($T[\'tickets\']) ?></td>') !== false);
+ok('白天/晚上票数取的也是 tickets',
+   strpos($stSrc, "num(\$s['day']['tickets'])") !== false
+   && strpos($stSrc, "num(\$s['night']['tickets'])") !== false);
+ok('占比按票数算', strpos($stSrc, "\$T['tickets'] / \$G['total']['tickets']") !== false);
+ok('默认按票数排', strpos($stSrc, "q('sort', 'tickets')") !== false);
+// 金额全压在一个岗位上时（自助餐：菜 0 元，钱在套餐那行）要自动说明，
+// 否则看的人会以为其它档口不赚钱
+ok('金额过度集中时给出说明', strpos($stSrc, '$amtSkew') !== false
+   && strpos($stSrc, '不能用来比较出品岗位') !== false);
+ok('说明是按实际数据触发的，不是写死「自助餐」',
+   strpos($stSrc, "/ \$G['total']['amount'] >= 0.9") !== false);
+ok('页面写明票数是推算的', strpos($stSrc, '票数是推算出来的') !== false);
+ok('页面写明重打的单数不到', strpos($stSrc, '重打的单') !== false);
 
 // =====================================================================
 echo "\n【2f】开台核对\n";

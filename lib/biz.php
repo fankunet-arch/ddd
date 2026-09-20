@@ -380,11 +380,24 @@ final class Biz
      * 这样既只查明细表一张表、不做 JOIN，又只返回十几行汇总结果，
      * 不需要把上万行明细拉回 PHP。
      *
-     * 「单量」= COUNT(DISTINCT order_head_id)，即该岗位出品涉及了多少张单（多少桌）。
-     * 一张单里同岗位点了几个菜也只算一单。
+     * 两个口径都给，因为它们回答的是不同的问题：
+     *
+     *   orders  = COUNT(DISTINCT order_head_id)             【桌数】
+     *             该岗位出品涉及了多少张账单。一桌分三次下单也只算 1。
+     *   tickets = COUNT(DISTINCT order_head_id, order_time) 【票数】
+     *             该岗位的打印机出了多少张票。一桌分三次下单就算 3。
+     *
+     * 为什么 order_time 能当「一次下单」的标识：order_detail 上有触发器
+     * `BEFORE INSERT … set NEW.order_time = now()`，同一次下单写进去的几行
+     * 时间相同。这一点在真实数据上验过（tests/probe_ticket.php）：
+     * 平均每批 5.26 行、只有 14.8% 是单行批、同一张单相邻两批的中位间隔
+     * 12 分 17 秒 —— 是真的又点了一轮，不是一次下单被拆成了几秒。
+     *
+     * ⚠️ 票数是【推算】出来的，不是数据库记下来的事实。
+     * 重打的单和手工补打的单，数据库里没有任何痕迹，永远数不到。
      *
      * @param array $pcOfItem  item_id => print_class|null（来自 menuItems()）
-     * @return array 每行 [pc, seg, orders, items, qty, lines_cnt, amount]
+     * @return array 每行 [pc, seg, orders, tickets, items, qty, lines_cnt, amount]
      */
     public static function stationVolume(string $from, string $to, string $table,
                                          array $pcOfItem, array $opts = []): array
@@ -441,11 +454,12 @@ final class Biz
 
         $sql = "SELECT {$pcExpr} AS pc,
                        {$seg}    AS seg,
-                       COUNT(DISTINCT order_head_id) AS orders,
-                       COUNT(DISTINCT menu_item_id)  AS items,
-                       SUM(quantity)                 AS qty,
-                       COUNT(*)                      AS lines_cnt,
-                       SUM(actual_price * quantity)  AS amount
+                       COUNT(DISTINCT order_head_id)             AS orders,
+                       COUNT(DISTINCT order_head_id, order_time) AS tickets,
+                       COUNT(DISTINCT menu_item_id)              AS items,
+                       SUM(quantity)                             AS qty,
+                       COUNT(*)                                  AS lines_cnt,
+                       SUM(actual_price * quantity)              AS amount
                 FROM {$table}
                 WHERE {$whereSql}
                 GROUP BY pc, seg";

@@ -74,11 +74,11 @@ final class Db {
         }
         if (str_contains($sql, 'COUNT(DISTINCT order_head_id)')) {
             return [
-                ['pc'=>11,'seg'=>'day',  'orders'=>30,'items'=>2,'qty'=>50,'lines_cnt'=>40,'amount'=>0],
-                ['pc'=>11,'seg'=>'night','orders'=>20,'items'=>2,'qty'=>35,'lines_cnt'=>25,'amount'=>0],
-                ['pc'=>6, 'seg'=>'day',  'orders'=>45,'items'=>1,'qty'=>60,'lines_cnt'=>55,'amount'=>180.0],
-                ['pc'=>-1,'seg'=>'day',  'orders'=>2, 'items'=>1,'qty'=>2, 'lines_cnt'=>2, 'amount'=>0],
-                ['pc'=>-2,'seg'=>'gap',  'orders'=>1, 'items'=>1,'qty'=>1, 'lines_cnt'=>1, 'amount'=>0],
+                ['pc'=>11,'seg'=>'day',  'orders'=>30,'tickets'=>66,'items'=>2,'qty'=>50,'lines_cnt'=>40,'amount'=>0],
+                ['pc'=>11,'seg'=>'night','orders'=>20,'tickets'=>44,'items'=>2,'qty'=>35,'lines_cnt'=>25,'amount'=>0],
+                ['pc'=>6, 'seg'=>'day',  'orders'=>45,'tickets'=>60,'items'=>1,'qty'=>60,'lines_cnt'=>55,'amount'=>180.0],
+                ['pc'=>-1,'seg'=>'day',  'orders'=>2, 'tickets'=>2, 'items'=>1,'qty'=>2, 'lines_cnt'=>2, 'amount'=>0],
+                ['pc'=>-2,'seg'=>'gap',  'orders'=>1, 'tickets'=>1, 'items'=>1,'qty'=>1, 'lines_cnt'=>1, 'amount'=>0],
             ];
         }
         if (str_contains($sql, 'FROM print_class')) {
@@ -221,6 +221,8 @@ run station.php "go=1&start=2026-08-12&end=2026-08-13"                "岗位-�
 run station.php "go=1&start=2026-08-12&end=2026-08-13&sort=qty"       "岗位-按份数"     || fails=$((fails+1))
 run station.php "go=1&start=2026-08-12&end=2026-08-13&sort=amount"    "岗位-按金额"     || fails=$((fails+1))
 run station.php "go=1&start=2026-08-12&end=2026-08-13&sort=%3Cbad%3E" "岗位-非法排序"   || fails=$((fails+1))
+run station.php "go=1&start=2026-08-12&end=2026-08-13&sort=tickets"    "岗位-按票数"     || fails=$((fails+1))
+run station.php "go=1&start=2026-08-12&end=2026-08-13&sort=orders"     "岗位-按桌数"     || fails=$((fails+1))
 run station.php ""                                                     "岗位-未查询"     || fails=$((fails+1))
 run meat.php ""                                                         "采购-录入页"     || fails=$((fails+1))
 run meat.php "pending=1"                                                "采购-只看待补"   || fails=$((fails+1))
