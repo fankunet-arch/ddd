@@ -120,6 +120,83 @@ try {
 }
 
 // =====================================================================
+say("\n===== 1b. 打印机是怎么配的？（决定「一张票」到底是什么）=====");
+// =====================================================================
+// 这一节是【用户纠正出来的】：一次 Enviado 里有 2*101 和 3*95，
+// 到打印机那儿出的是【两张票】—— 一张 101（2 份）、一张 95（3 份）。
+// 也就是说这台打印机是「一道菜一张单」，不是「一次下单一张单」。
+// 而且份数不拆票（2 份还在同一张上），所以粒度是【明细行】，不是【份】。
+//
+// 这件事不用猜：print_devices 上就有开关。三张字典表各查一次、
+// 在 PHP 里拼（都是几行到几十行的小表，不和大表 JOIN —— 铁律五）。
+$pcDict = Db::select('SELECT print_class_id, print_class_name FROM print_class');
+$rel    = Db::select('SELECT print_class_id, print_device_id FROM print_class_relation');
+// bit(1) 取回来是二进制串（"\0" / "\1"），+0 强制成数字才好判断
+$dev    = Db::select('SELECT print_device_id, print_device_name,
+                             split_print + 0 AS split_print,
+                             print_label + 0 AS print_label
+                      FROM print_devices');
+$devById = [];
+foreach ($dev as $d) {
+    $devById[(int) $d['print_device_id']] = $d;
+}
+$devOfPc = [];
+foreach ($rel as $r) {
+    $devOfPc[(int) $r['print_class_id']][] = (int) $r['print_device_id'];
+}
+
+$splitYes = 0;
+$splitNo  = 0;
+$labelYes = 0;
+printf("    %-14s %-18s %-10s %-10s %s\n", '岗位', '打印机', 'split_print', 'print_label', '一张票是什么');
+foreach ($pcDict as $pc) {
+    $id  = (int) $pc['print_class_id'];
+    $ids = $devOfPc[$id] ?? [];
+    if (!$ids) {
+        printf("    %-14s %-18s %s\n", (string) $pc['print_class_name'], '(没配打印机)', '—');
+        continue;
+    }
+    foreach ($ids as $did) {
+        $d  = $devById[$did] ?? null;
+        $sp = $d === null ? null : (int) $d['split_print'];
+        $lb = $d === null ? null : (int) $d['print_label'];
+        if ($sp === 1) { $splitYes++; } elseif ($sp === 0) { $splitNo++; }
+        if ($lb === 1) { $labelYes++; }
+        printf("    %-14s %-18s %-11s %-11s %s\n",
+               (string) $pc['print_class_name'],
+               $d === null ? "#{$did}（查不到）" : (string) $d['print_device_name'],
+               $sp === null ? '?' : (string) $sp,
+               $lb === null ? '?' : (string) $lb,
+               $sp === 1 ? '一道菜一张（= 明细行数）'
+                         : ($sp === 0 ? '一次下单一张（= 下单次数）' : '?'));
+    }
+}
+kv('split_print = 1 的（一菜一单）', $splitYes . ' 个');
+kv('split_print = 0 的（一单一票）', $splitNo . ' 个');
+if ($labelYes > 0) {
+    kv('print_label = 1 的', $labelYes . ' 个  ← 标签模式，粒度可能还不一样，要单独看');
+}
+if ($splitYes > 0 && $splitNo === 0) {
+    say('    → 全部是【一道菜一张】。那么「票数」应当等于【明细行数】，');
+    say('      而不是「下单次数」。岗位页现在那一列算小了。');
+    $verdict['split_print'] = 'line';
+} elseif ($splitNo > 0 && $splitYes === 0) {
+    say('    → 全部是【一次下单一张】。「票数」= 该岗位参与的下单次数，');
+    say('      也就是岗位页现在那一列。');
+    $verdict['split_print'] = 'batch';
+} elseif ($splitYes > 0) {
+    say('    → ⚠️ 两种配置【混着】。那就不能一个公式套到底 ——');
+    say('      得按岗位分别算：split_print=1 的用行数，=0 的用下单次数。');
+    $verdict['split_print'] = 'mixed';
+} else {
+    say('    → 读不出配置（表是空的或者字段含义对不上），');
+    say('      那就只能拿实际出纸情况人工核一核。');
+    $verdict['split_print'] = null;
+}
+say('    参考：第 6 节会把「下单次数」和「明细行数」并排列出来，');
+say('    照着上面的配置挑哪一列才是真正的票数。');
+
+// =====================================================================
 // 先把两份原始清单一次取回来，后面几节全在 PHP 里算。
 //
 // 为什么不在 SQL 里分别聚合：上一版就是那么做的，结果第 3 节的
@@ -431,21 +508,23 @@ say("\n===== 6. 各岗位：现在页面上的「桌数」 vs 推算的「单数
 $rows = Db::select(
     'SELECT ' . $pcExpr . ' AS pc,
             COUNT(DISTINCT order_head_id)             AS tables_cnt,
-            COUNT(DISTINCT order_head_id, order_time) AS tickets,
+            COUNT(DISTINCT order_head_id, order_time) AS batches,
+            COUNT(*)                                  AS lines_cnt,
             SUM(quantity)                             AS qty
      FROM history_order_detail
      WHERE order_time >= :from AND order_time < :to AND ' . DISH_ONLY . '
-     GROUP BY pc ORDER BY tickets DESC',
+     GROUP BY pc ORDER BY lines_cnt DESC',
     [':from' => $from, ':to' => $to]);
 
-printf("    %-16s %8s %8s %8s %8s\n", '岗位', '桌数', '单数', '每桌单数', '份数');
+say('    「下单次数」= 该岗位参与了几次下单；「明细行数」= 几行菜。');
+say('    哪一列才是票数，看 1b 节的 split_print：=1 用行数，=0 用下单次数。');
+printf("    %-16s %8s %10s %10s %8s\n", '岗位', '桌数', '下单次数', '明细行数', '份数');
 foreach ($rows as $r) {
     $pc = (int) $r['pc'];
     $nm = $pc === Biz::PC_NONE ? '（未配岗位）'
         : ($pc === Biz::PC_UNKNOWN ? '（已删除的菜）' : ($pcName[$pc] ?? "#{$pc}"));
-    $t  = (int) $r['tables_cnt'];
-    printf("    %-16s %8d %8d %8s %8s\n", $nm, $t, (int) $r['tickets'],
-           $t > 0 ? sprintf('%.2f', (int) $r['tickets'] / $t) : '—',
+    printf("    %-16s %8d %10d %10d %8s\n", $nm, (int) $r['tables_cnt'],
+           (int) $r['batches'], (int) $r['lines_cnt'],
            rtrim(rtrim(number_format((float) $r['qty'], 1), '0'), '.'));
 }
 

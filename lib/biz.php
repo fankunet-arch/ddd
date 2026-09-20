@@ -22,6 +22,31 @@ require_once __DIR__ . '/db.php';
 
 final class Biz
 {
+    /**
+     * 一行的金额。
+     *
+     * ============================================================
+     *  ⚠️ 【不要】改成 actual_price * quantity
+     * ============================================================
+     *  这个字段存的就是【行金额】，数量早就乘进去了。再乘一次会虚高，
+     *  而且虚高的倍数【不是】明面上那个「平均每行几份」，而是【按金额加权】的：
+     *
+     *      实测某天：平均每行 1.33 份，金额却虚高 3.07 倍
+     *
+     *  因为自助餐套餐那一行的数量 = 人数、金额又最大，权重压倒性。
+     *  所以光看「平均每行才 1.3 份，能差多少」是会被骗过去的。
+     *
+     *  怎么发现的：页面上 bebidas 一天 32,838 €、人均 42 € —— 一个
+     *  【看着完全合理】的数字。错就错在这种地方最难发现。
+     *
+     *  怎么验的：拿账单头表的 SUM(actual_amount) 对一遍。那是完全独立的
+     *  来源（营业额统计页用的就是它）：
+     *      SUM(actual_price)             8,058.99   差   +1.0%  ✓
+     *      SUM(actual_price * quantity) 24,776.63   差 +210.6%  ✗
+     *  见 tests/probe_ticket.php 第 6b 节 —— 那一节留着就是为了随时能再验。
+     */
+    public const MONEY_EXPR = 'actual_price';
+
     /** 时段常量 */
     public const SEG_DAY   = 'day';
     public const SEG_NIGHT = 'night';
@@ -308,13 +333,14 @@ final class Biz
 
         $seg      = self::segExpr('order_time');
         $whereSql = implode(' AND ', $where);
+        $money    = self::MONEY_EXPR;          // 别乘 quantity，看常量上的说明
 
         $sql = "SELECT menu_item_id,
                        MAX(menu_item_name)             AS item_name,
                        {$seg}                          AS seg,
                        SUM(quantity)                   AS qty,
                        COUNT(*)                        AS times,
-                       SUM(actual_price * quantity)    AS amount
+                       SUM({$money})                  AS amount
                 FROM {$table}
                 WHERE {$whereSql}
                 GROUP BY menu_item_id, seg";
@@ -345,12 +371,13 @@ final class Biz
         $bizDate  = self::bizDateExpr('order_time');
         $seg      = self::segExpr('order_time');
         $whereSql = implode(' AND ', $where);
+        $money    = self::MONEY_EXPR;          // 别乘 quantity，看常量上的说明
 
         $sql = "SELECT {$bizDate} AS biz_date,
                        {$seg}     AS seg,
                        SUM(quantity)                AS qty,
                        COUNT(*)                     AS times,
-                       SUM(actual_price * quantity) AS amount
+                       SUM({$money})                AS amount
                 FROM {$table}
                 WHERE {$whereSql}
                 GROUP BY biz_date, seg
@@ -451,6 +478,7 @@ final class Biz
         self::detailFilter($opts, $where);
         $whereSql = implode(' AND ', $where);
         $seg      = self::segExpr('order_time');
+        $money    = self::MONEY_EXPR;          // 别乘 quantity，看常量上的说明
 
         $sql = "SELECT {$pcExpr} AS pc,
                        {$seg}    AS seg,
@@ -459,7 +487,7 @@ final class Biz
                        COUNT(DISTINCT menu_item_id)              AS items,
                        SUM(quantity)                             AS qty,
                        COUNT(*)                                  AS lines_cnt,
-                       SUM(actual_price * quantity)              AS amount
+                       SUM({$money})                             AS amount
                 FROM {$table}
                 WHERE {$whereSql}
                 GROUP BY pc, seg";
@@ -563,13 +591,14 @@ final class Biz
 
         $comboIn = $compile($comboIds);
         $drinkIn = $compile($drinkIds);
+        $money   = self::MONEY_EXPR;           // 别乘 quantity，看常量上的说明
 
         $comboExpr = $comboIn !== ''
             ? "SUM(CASE WHEN menu_item_id IN ({$comboIn}) THEN quantity ELSE 0 END)" : '0';
         $drinkExpr = $drinkIn !== ''
             ? "SUM(CASE WHEN menu_item_id IN ({$drinkIn}) THEN quantity ELSE 0 END)" : '0';
         $drinkAmt  = $drinkIn !== ''
-            ? "SUM(CASE WHEN menu_item_id IN ({$drinkIn}) THEN actual_price * quantity ELSE 0 END)" : '0';
+            ? "SUM(CASE WHEN menu_item_id IN ({$drinkIn}) THEN {$money} ELSE 0 END)" : '0';
 
         $sql = "SELECT order_head_id,
                        {$comboExpr}  AS combo_qty,
@@ -617,6 +646,65 @@ final class Biz
                 'is_condiment' => ((int) $r['item_type']) === 1,
                 'price'        => (float) ($r['price_1'] ?? 0),
             ];
+        }
+        return $out;
+    }
+
+    /**
+     * 每个岗位的打印机是不是【一道菜一张单】。
+     *
+     * ============================================================
+     *  为什么必须读这个开关，不能一个公式套到底
+     * ============================================================
+     *  「一张票」是什么，取决于打印机怎么配的，而不同岗位可以配得不一样：
+     *
+     *    split_print = 1  一道菜一张 —— 一次下单点了 2*101 和 3*95，
+     *                     出两张票：一张 101（2 份）、一张 95（3 份）。
+     *                     票数 = 【明细行数】
+     *    split_print = 0  一次下单一张 —— 该岗位那一次点的菜印在同一张上。
+     *                     票数 = 【该岗位参与的下单次数】
+     *
+     *  注意份数【不拆票】：2 份还是印在同一张上，所以粒度是「行」不是「份」。
+     *
+     *  这一条是用户纠正出来的 —— 第一版想当然按「一次下单一张」算，
+     *  结果对他们的店少算了一半以上。所以现在去读配置，而不是猜。
+     *
+     *  print_class_relation（岗位→打印机）和 print_devices 都是几十行的小表，
+     *  各查一次在 PHP 里拼，不和大表 JOIN（铁律五）。
+     *
+     * @return array print_class_id => ['split' => true|false|null, 'device' => 打印机名]
+     *               split 为 null 表示这个岗位没配打印机、或者配置读不出来
+     */
+    public static function printerModes(): array
+    {
+        $rel = Db::select('SELECT print_class_id, print_device_id FROM print_class_relation');
+        // bit(1) 取回来是二进制串（"\0" / "\1"）—— 直接 (int) 会得到 0，
+        // 所以在 SQL 里 +0 强制成数字。这个坑不显眼：不加的话全店都会
+        // 被判成「一次下单一张」，而那正好是错的那一边。
+        $dev = Db::select('SELECT print_device_id, print_device_name,
+                                  split_print + 0 AS split_print
+                           FROM print_devices');
+        $byId = [];
+        foreach ($dev as $d) {
+            $byId[(int) $d['print_device_id']] = $d;
+        }
+        $out = [];
+        foreach ($rel as $r) {
+            $pc  = (int) $r['print_class_id'];
+            $d   = $byId[(int) $r['print_device_id']] ?? null;
+            if ($d === null) {
+                continue;
+            }
+            $sp = (int) $d['split_print'] === 1;
+            if (isset($out[$pc])) {
+                // 一个岗位配了多台打印机、而且配置还不一致：
+                // 取【更多票】的那一边（split=true）。宁可多报，
+                // 也别让人以为厨房出的纸比实际少。
+                $out[$pc]['split'] = $out[$pc]['split'] || $sp;
+                $out[$pc]['device'] .= '、' . (string) $d['print_device_name'];
+            } else {
+                $out[$pc] = ['split' => $sp, 'device' => (string) $d['print_device_name']];
+            }
         }
         return $out;
     }

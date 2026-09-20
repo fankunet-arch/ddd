@@ -23,13 +23,17 @@ $start = q('start', $today);
 $end   = q('end', $today);
 // 默认按【票数】排 —— 自助餐几乎每桌都会点到每个档口，
 // 按桌数排的话各岗位挤成一团（实测 117/110/107/105/105/103/100/93/82），
-// 排出来的顺序几乎没有信息量；票数的差距才真实（243 … 117）。
-$sort  = q('sort', 'tickets');
+// 排出来的顺序几乎没有信息量。
+//
+// 票数用的是 lines（明细行数）：这家店的打印机是【一道菜一张单】——
+// 一次下单里有 2*101 和 3*95，出的是两张票（一张 101 两份、一张 95 三份），
+// 不是一张。份数不拆票，所以粒度是「行」不是「份」。
+$sort  = q('sort', 'lines');
 $includeCombo = qbool('include_combo_child');
 $withLive     = !isset($_GET['go']) || qbool('with_live');
 
-if (!in_array($sort, ['tickets', 'orders', 'qty', 'amount', 'lines'], true)) {
-    $sort = 'tickets';
+if (!in_array($sort, ['lines', 'tickets', 'orders', 'qty', 'amount'], true)) {
+    $sort = 'lines';
 }
 
 $error = null;
@@ -88,10 +92,10 @@ pageHeader('岗位单量排名', 'station');
     <label>结束日期<input type="date" name="end" value="<?= h($end) ?>" required></label>
     <label>排名依据
       <select name="sort">
-        <option value="tickets" <?= $sort === 'tickets' ? 'selected' : '' ?>>票数（出了多少张单据）</option>
+        <option value="lines"   <?= $sort === 'lines'   ? 'selected' : '' ?>>票数（打印机出了几张）</option>
+        <option value="qty"     <?= $sort === 'qty'     ? 'selected' : '' ?>>份数（出了多少份菜）</option>
+        <option value="tickets" <?= $sort === 'tickets' ? 'selected' : '' ?>>下单次数（被叫了几次）</option>
         <option value="orders"  <?= $sort === 'orders'  ? 'selected' : '' ?>>桌数（涉及多少张账单）</option>
-        <option value="qty"     <?= $sort === 'qty'     ? 'selected' : '' ?>>份数</option>
-        <option value="lines"   <?= $sort === 'lines'   ? 'selected' : '' ?>>行数</option>
         <option value="amount"  <?= $sort === 'amount'  ? 'selected' : '' ?>>金额</option>
       </select>
     </label>
@@ -114,8 +118,8 @@ pageHeader('岗位单量排名', 'station');
 <?php if ($rows !== null):
   $list  = Report::sortStations($rows['stations'], $sort);
   $G     = $rows['grand'];
-  $label = ['tickets' => '票数', 'orders' => '桌数', 'qty' => '份数',
-            'lines' => '行数', 'amount' => '金额'][$sort];
+  $label = ['lines' => '票数', 'qty' => '份数', 'tickets' => '下单次数',
+            'orders' => '桌数', 'amount' => '金额'][$sort];
   $maxV  = $list ? max(array_map(fn($s) => $s['total'][$sort], $list)) : 0;
   $showGap = $G['gap']['orders'] > 0;
   // 金额压在极少数岗位上时要说明白。自助餐就是这样：菜本身 0 元，
@@ -126,13 +130,17 @@ pageHeader('岗位单量排名', 'station');
   $amtSkew = $G['total']['amount'] > 0 && $topAmt / $G['total']['amount'] >= 0.9;
 ?>
   <p class="note">
-    <strong>票数</strong>是该岗位的打印机出了多少张单据 ——
-    一桌分三次下单，这个岗位就出三张票，算 3。
-    <strong>桌数</strong>是涉及多少张账单，同一桌无论下单几次都只算 1。
-    <strong>份数</strong>是数量合计（一行「拉面 ×2」算 2），<strong>行数</strong>是明细行数（算 1）。
+    <strong>票数</strong>是该岗位的打印机出了多少张单据。这里的打印机是
+    <strong>一道菜一张单</strong> —— 一次下单里点了 2 份 A 和 3 份 B，
+    出的是<strong>两张</strong>票（一张 A 两份、一张 B 三份），不是一张。
+    所以票数 = <strong>这个岗位的菜被点了多少次</strong>；份数不拆票。
     <br>
-    各岗位的桌数与票数之和都会大于实际总数 —— 一次下单通常会经过好几个岗位
-    （实测平均 2.9 个），每个岗位各自计一次。
+    <strong>份数</strong>是出了多少份菜（一行「拉面 ×2」算 2 份、1 张票）。
+    <strong>下单次数</strong>是这个岗位被叫了几次（一次下单里该岗位有几个菜也只算 1 次）。
+    <strong>桌数</strong>是涉及多少张账单，同一桌无论下单几次都只算 1。
+    <br>
+    各岗位的这几个数相加都会大于实际总数 —— 一次下单通常会经过好几个岗位，
+    每个岗位各自计一次。
   </p>
 
   <?php if ($amtSkew): ?>
@@ -158,8 +166,9 @@ pageHeader('岗位单量排名', 'station');
       <th class="n hide-sm">白天票数</th><th class="n hide-sm">晚上票数</th>
       <?php if ($showGap): ?><th class="n">时段外</th><?php endif; ?>
       <th class="n">全天票数</th><th class="n">占比</th>
-      <th class="n">桌数</th><th class="n hide-sm">每桌票数</th>
-      <th class="n">份数</th><th class="n hide-sm">行数</th><th class="n hide-sm">菜品数</th><th class="n">金额</th>
+      <th class="n">份数</th><th class="n hide-sm">下单次数</th>
+      <th class="n hide-sm">桌数</th><th class="n hide-sm">每桌票数</th>
+      <th class="n hide-sm">菜品数</th><th class="n">金额</th>
       <th class="barcol"></th>
     </tr></thead>
     <tbody>
@@ -169,17 +178,17 @@ pageHeader('岗位单量排名', 'station');
       <tr>
         <td class="n dim"><?= $i + 1 ?></td>
         <td class="iname"><span title="<?= h($s['pc_name']) ?>"><strong><?= h($s['pc_name']) ?></strong></span></td>
-        <td class="n hide-sm"><?= num($s['day']['tickets']) ?></td>
-        <td class="n hide-sm"><?= num($s['night']['tickets']) ?></td>
-        <?php if ($showGap): ?><td class="n"><?= num($s['gap']['tickets']) ?></td><?php endif; ?>
-        <td class="n strong"><?= num($T['tickets']) ?></td>
-        <td class="n dim"><?= $G['total']['tickets'] > 0
-              ? number_format($T['tickets'] / $G['total']['tickets'] * 100, 1) . '%' : '—' ?></td>
-        <td class="n"><?= num($T['orders']) ?></td>
-        <td class="n dim hide-sm"><?= $T['orders'] > 0
-              ? number_format($T['tickets'] / $T['orders'], 2) : '—' ?></td>
+        <td class="n hide-sm"><?= num($s['day']['lines']) ?></td>
+        <td class="n hide-sm"><?= num($s['night']['lines']) ?></td>
+        <?php if ($showGap): ?><td class="n"><?= num($s['gap']['lines']) ?></td><?php endif; ?>
+        <td class="n strong"><?= num($T['lines']) ?></td>
+        <td class="n dim"><?= $G['total']['lines'] > 0
+              ? number_format($T['lines'] / $G['total']['lines'] * 100, 1) . '%' : '—' ?></td>
         <td class="n"><?= qty($T['qty']) ?></td>
-        <td class="n hide-sm"><?= num($T['lines']) ?></td>
+        <td class="n hide-sm"><?= num($T['tickets']) ?></td>
+        <td class="n hide-sm"><?= num($T['orders']) ?></td>
+        <td class="n dim hide-sm"><?= $T['orders'] > 0
+              ? number_format($T['lines'] / $T['orders'], 2) : '—' ?></td>
         <td class="n dim hide-sm"><?= num($T['items']) ?></td>
         <td class="n"><?= money($T['amount']) ?></td>
         <td class="barcol"><span class="bar top" style="width:<?= $w ?>%"></span></td>
@@ -188,15 +197,15 @@ pageHeader('岗位单量排名', 'station');
     </tbody>
     <tfoot><tr>
       <th></th><th>合计 <?= num(count($list)) ?> 个岗位</th>
-      <th class="n hide-sm"><?= num($G['day']['tickets']) ?></th>
-      <th class="n hide-sm"><?= num($G['night']['tickets']) ?></th>
-      <?php if ($showGap): ?><th class="n"><?= num($G['gap']['tickets']) ?></th><?php endif; ?>
-      <th class="n"><?= num($G['total']['tickets']) ?></th>
+      <th class="n hide-sm"><?= num($G['day']['lines']) ?></th>
+      <th class="n hide-sm"><?= num($G['night']['lines']) ?></th>
+      <?php if ($showGap): ?><th class="n"><?= num($G['gap']['lines']) ?></th><?php endif; ?>
+      <th class="n"><?= num($G['total']['lines']) ?></th>
       <th class="n">—</th>
-      <th class="n"><?= num($G['total']['orders']) ?></th>
-      <th class="n hide-sm">—</th>
       <th class="n"><?= qty($G['total']['qty']) ?></th>
-      <th class="n hide-sm"><?= num($G['total']['lines']) ?></th>
+      <th class="n hide-sm"><?= num($G['total']['tickets']) ?></th>
+      <th class="n hide-sm"><?= num($G['total']['orders']) ?></th>
+      <th class="n hide-sm">—</th>
       <th class="n hide-sm">—</th>
       <th class="n"><?= money($G['total']['amount']) ?></th>
       <th></th>
@@ -204,14 +213,14 @@ pageHeader('岗位单量排名', 'station');
   </table>
   </div>
   <p class="note">
-    合计行的票数和桌数都是各岗位相加，一次下单经过多个岗位会被重复计入，
-    因此<strong>不等于</strong>实际的总票数和总账单数；
-    「菜品数」「每桌票数」是各岗位各自算的，也不能相加，故合计处留空。
-    营业额请以<a href="index.php">营业额统计</a>页为准。
+    合计行的票数、下单次数、桌数都是各岗位相加，一次下单经过多个岗位会被重复计入，
+    因此<strong>不等于</strong>实际总数；「菜品数」「每桌票数」是各岗位各自算的，
+    也不能相加，故合计处留空。营业额请以<a href="index.php">营业额统计</a>页为准。
     <br>
-    <strong>票数是推算出来的</strong>：数据库没有打印记录，靠「同一张单里同一秒写进去的菜
-    算一次下单」还原（已在真实数据上验证，见 <code>tests/probe_ticket.php</code>）。
+    <strong>数据库里没有打印记录</strong>，所以票数是按「一道菜一张单」从明细行数得出的。
     <strong>重打的单和手工补打的单数不到</strong> —— 数据库里没有痕迹。
+    如果哪个岗位的打印机改成了「一次下单一张」，这一列对那个岗位就不准了，
+    跑一次 <code>tests/probe_ticket.php</code> 第 1b 节能看到各打印机的实际配置。
   </p>
 
   <?php endif; ?>

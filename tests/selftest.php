@@ -673,6 +673,25 @@ ok('剔除后 SQL 仍通过只读检查', (static function () use ($bsql) {
     try { Db::assertReadOnly($bsql); return true; } catch (Throwable $e) { return false; }
 })());
 
+// ---- 金额口径：actual_price 就是行金额，【不能】再乘 quantity ----
+// 这个 bug 在库里活了很久，因为原来一条断言都没有 —— 而它算出来的数
+// 「看着完全合理」（页面上 bebidas 一天 32,838 €、人均 42 €）。
+// 拿账单头对过：SUM(actual_price) 差 +1.0%，乘了 quantity 差 +210.6%。
+$moneySqls = [
+    '岗位'     => $ssql,
+    '菜品汇总' => Biz::buildDishTotalsSql($from, $to, 'history_order_detail')[0],
+    '菜品逐日' => Biz::buildDishByDaySql($from, $to, 'history_order_detail', 1)[0],
+    '酒水核对' => Biz::buildComboCountSql([1, 2], [10], [20])[0],
+];
+foreach ($moneySqls as $name => $q) {
+    ok("{$name} SQL 没有把金额乘 quantity",
+       !preg_match('/actual_price\s*\*\s*quantity/i', $q));
+    ok("{$name} SQL 金额取的是 actual_price", strpos($q, 'actual_price') !== false);
+}
+eq('金额口径只有一份定义', Biz::MONEY_EXPR, 'actual_price');
+// 份数照常是 SUM(quantity) —— 改金额口径不能顺手把份数也改了
+ok('岗位 SQL 份数仍是 SUM(quantity)', strpos($ssql, 'SUM(quantity)') !== false);
+
 // ---- 「菜品→岗位」只能有一份定义 ----
 // 岗位页和诊断脚本都要这份映射。各写各的话，两边对「这道菜归哪个岗位」
 // 的判断迟早会不一致 —— 而两个不一致的数字摆在一起，没人分得清哪个对。
@@ -765,20 +784,33 @@ ok('非法排序字段回退到票数',
 $stSrc = (string) file_get_contents($ROOT . '/station.php');
 ok('页面有票数列', strpos($stSrc, '全天票数') !== false);
 ok('页面仍保留桌数列', strpos($stSrc, '>桌数<') !== false);
-ok('全天票数那一格取的是 tickets，不是 orders',
-   strpos($stSrc, '<td class="n strong"><?= num($T[\'tickets\']) ?></td>') !== false);
-ok('白天/晚上票数取的也是 tickets',
-   strpos($stSrc, "num(\$s['day']['tickets'])") !== false
-   && strpos($stSrc, "num(\$s['night']['tickets'])") !== false);
-ok('占比按票数算', strpos($stSrc, "\$T['tickets'] / \$G['total']['tickets']") !== false);
-ok('默认按票数排', strpos($stSrc, "q('sort', 'tickets')") !== false);
+// 票数 = 明细行数（lines）。这家店的打印机是【一道菜一张单】——
+// 一次下单点了 2 份 A 和 3 份 B，出两张票，不是一张。
+// 第一版按「一次下单一张」（tickets）算，对他们的店少算一半以上，是用户纠正的。
+ok('全天票数那一格取的是 lines（一道菜一张单）',
+   strpos($stSrc, '<td class="n strong"><?= num($T[\'lines\']) ?></td>') !== false);
+ok('白天/晚上票数取的也是 lines',
+   strpos($stSrc, "num(\$s['day']['lines'])") !== false
+   && strpos($stSrc, "num(\$s['night']['lines'])") !== false);
+ok('占比按票数算', strpos($stSrc, "\$T['lines'] / \$G['total']['lines']") !== false);
+ok('默认按票数排', strpos($stSrc, "q('sort', 'lines')") !== false);
+// 下单次数（tickets）作为独立的一列保留 —— 它回答的是另一个问题：
+// 这个岗位被叫了几次。两个都有用，但不能混为一谈。
+// 锚定整个表头格：光搜「下单次数」四个字会被下面那段说明文字顶着，
+// 把表头删掉照样通过 —— 和第 19 条是同一个病
+ok('下单次数仍单独成列',
+   strpos($stSrc, '<th class="n hide-sm">下单次数</th>') !== false
+   && strpos($stSrc, "num(\$T['tickets'])") !== false);
 // 金额全压在一个岗位上时（自助餐：菜 0 元，钱在套餐那行）要自动说明，
 // 否则看的人会以为其它档口不赚钱
 ok('金额过度集中时给出说明', strpos($stSrc, '$amtSkew') !== false
    && strpos($stSrc, '不能用来比较出品岗位') !== false);
 ok('说明是按实际数据触发的，不是写死「自助餐」',
    strpos($stSrc, "/ \$G['total']['amount'] >= 0.9") !== false);
-ok('页面写明票数是推算的', strpos($stSrc, '票数是推算出来的') !== false);
+ok('页面写明数据库没有打印记录',
+   strpos($stSrc, '<strong>数据库里没有打印记录</strong>') !== false);
+ok('页面写明打印机是一道菜一张单',
+   strpos($stSrc, '一道菜一张单') !== false);
 ok('页面写明重打的单数不到', strpos($stSrc, '重打的单') !== false);
 
 // =====================================================================
